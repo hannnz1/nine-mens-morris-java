@@ -85,13 +85,6 @@ public class Game {
             }
         }
 
-        for (var p : getStraightLines().keySet()) {
-            System.out.print("Point:" + p + "->");
-            for (var l : getStraightLines().get(p)) {
-                System.out.print("" + l + ";");
-            }
-            System.out.println();
-        }
     }
 
     // Checks if the game is over (no more valid moves)

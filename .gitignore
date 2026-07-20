@@ -1,0 +1,18 @@
+# IDE metadata
+.idea/
+*.iml
+
+# Java build output
+target/
+out/
+*.class
+*.jar
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+
+# Logs and temporary files
+*.log
+*.tmp
+

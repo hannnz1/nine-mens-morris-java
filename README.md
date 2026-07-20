@@ -1,5 +1,7 @@
 # Nine Men's Morris
 
+[![Java CI](https://github.com/hannnz1/nine-mens-morris-java/actions/workflows/ci.yml/badge.svg)](https://github.com/hannnz1/nine-mens-morris-java/actions/workflows/ci.yml)
+
 A Java desktop implementation of **Nine Men's Morris**, developed as a team project for Monash University **FIT3077 - Software Engineering: Architecture and Design (Semester 1, 2023)** by **Group 43**.
 
 The application supports the complete local two-player game flow, including piece placement, adjacent movement, flying when a player has three pieces remaining, mill detection, piece removal, hints, tutorials, and win detection.
@@ -50,10 +52,46 @@ project-main/
 
 ## Requirements
 
-- JDK 15
-- IntelliJ IDEA, or a terminal with `javac` and `java` available
+- JDK 17 recommended (the project is compiled with Java 15 compatibility)
+- Maven 3.9+, IntelliJ IDEA, or Docker
 
 The project does not require external runtime dependencies or a database.
+
+## Build and Test with Maven
+
+From the repository root:
+
+```powershell
+mvn clean verify
+```
+
+This command compiles the application, runs the JUnit test suite, and packages an executable JAR. Run the packaged application with:
+
+```powershell
+java -jar .\target\nine-mens-morris-1.0.0-SNAPSHOT.jar
+```
+
+The automated tests currently cover:
+
+- the 24-position board topology and bidirectional edges;
+- the initial placement state and legal candidates;
+- turn and piece-count transitions;
+- rejection of occupied placement positions;
+- mill formation and opponent-piece removal.
+
+## Test with Docker
+
+If Maven or a JDK is not installed locally, run the same test suite in an isolated container:
+
+```powershell
+docker run --rm `
+  -v "${PWD}:/workspace" `
+  -w /workspace `
+  maven:3.9.9-eclipse-temurin-17 `
+  mvn --batch-mode --no-transfer-progress clean verify
+```
+
+Every push and pull request to `main` also runs `mvn verify` through GitHub Actions.
 
 ## Run with IntelliJ IDEA
 
@@ -98,8 +136,8 @@ Running from the `src` directory ensures the tutorial images under `src/images` 
 ## Current Limitations
 
 - Local two-player mode only; there is no network multiplayer or computer opponent.
-- The project currently uses IntelliJ project configuration rather than Maven or Gradle.
-- Automated unit and integration tests have not yet been added.
+- The original source layout is retained for compatibility with the university submission; a future refactor will move the domain engine into a conventional Maven module.
+- The initial test suite focuses on placement and mill rules; movement, flying, and end-game scenarios need additional coverage.
 - Game state is stored in memory and is not persisted between sessions.
 
 ## Third-Party Component
