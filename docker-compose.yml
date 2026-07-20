@@ -1,0 +1,33 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-morris}
+      POSTGRES_USER: ${POSTGRES_USER:-morris}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-for-production}
+    volumes:
+      - morris-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-morris}
+      DB_USERNAME: ${POSTGRES_USER:-morris}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-change-me-for-production}
+    ports:
+      - "${BACKEND_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  morris-postgres-data:

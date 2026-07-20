@@ -1,0 +1,14 @@
+.git
+.github
+.idea
+**/target
+**/out
+*.iml
+*.log
+Design Rationale
+Revised Architecture
+Sequence Diagrams
+Screenshots
+UI Design
+Nine Man's Morris
+src
