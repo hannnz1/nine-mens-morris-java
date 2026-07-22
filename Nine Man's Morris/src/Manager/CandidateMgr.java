@@ -129,4 +129,8 @@ public class CandidateMgr {
     public Set<Position> getCandidates() {
         return candidates;
     }
+
+    public void setCandidates(Set<Position> candidates) {
+        this.candidates = new HashSet<>(candidates);
+    }
 }

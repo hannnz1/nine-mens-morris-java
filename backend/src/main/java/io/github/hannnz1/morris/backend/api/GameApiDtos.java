@@ -22,7 +22,18 @@ public final class GameApiDtos {
 
     public record CreateGameRequest(
             @NotBlank @Size(max = 50) String whitePlayer,
+            @Size(max = 50) String blackPlayer
+    ) {
+    }
+
+    public record JoinGameRequest(
             @NotBlank @Size(max = 50) String blackPlayer
+    ) {
+    }
+
+    public record JoinGameResponse(
+            GameResponse game,
+            PlayerCredential credential
     ) {
     }
 

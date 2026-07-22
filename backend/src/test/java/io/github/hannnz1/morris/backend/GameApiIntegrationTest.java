@@ -59,6 +59,39 @@ class GameApiIntegrationTest {
     }
 
     @Test
+    void createsAWaitingGameAndLetsTheSecondPlayerClaimTheirOwnCredential() throws Exception {
+        MvcResult createResult = mockMvc.perform(post("/api/v1/games")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"whitePlayer\":\"Alice\"}"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.game.status").value("WAITING_FOR_PLAYER"))
+                .andExpect(jsonPath("$.whiteCredential.token").isNotEmpty())
+                .andExpect(jsonPath("$.blackCredential").doesNotExist())
+                .andReturn();
+
+        UUID gameId = UUID.fromString(json(createResult).at("/game/id").asText());
+        String whiteToken = json(createResult).at("/whiteCredential/token").asText();
+
+        submit(new CreatedGame(gameId, whiteToken, ""), whiteToken, "too-early",
+                actionBody("PLACE", null, "A1", 0), 409);
+
+        mockMvc.perform(post("/api/v1/games/{id}/join", gameId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"blackPlayer\":\"Bob\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.game.status").value("IN_PROGRESS"))
+                .andExpect(jsonPath("$.credential.side").value("BLACK"))
+                .andExpect(jsonPath("$.credential.playerName").value("Bob"))
+                .andExpect(jsonPath("$.credential.token").isNotEmpty());
+
+        mockMvc.perform(post("/api/v1/games/{id}/join", gameId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"blackPlayer\":\"Mallory\"}"))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("GAME_ALREADY_FULL"));
+    }
+
+    @Test
     void appliesAnActionAndReturnsTheSameResponseForAnIdempotentRetry() throws Exception {
         CreatedGame created = createGame();
         String body = actionBody("PLACE", null, "A1", 0);

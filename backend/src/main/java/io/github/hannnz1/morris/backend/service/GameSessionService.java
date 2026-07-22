@@ -7,6 +7,8 @@ import io.github.hannnz1.morris.backend.api.GameApiDtos.ActionRequest;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.CreateGameRequest;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.CreateGameResponse;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.GameResponse;
+import io.github.hannnz1.morris.backend.api.GameApiDtos.JoinGameRequest;
+import io.github.hannnz1.morris.backend.api.GameApiDtos.JoinGameResponse;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.PlayerCredential;
 import io.github.hannnz1.morris.backend.persistence.GameSessionEntity;
 import io.github.hannnz1.morris.backend.persistence.GameSessionRepository;
@@ -54,18 +56,39 @@ public class GameSessionService {
     @Transactional
     public CreateGameResponse create(CreateGameRequest request) {
         String whiteToken = tokens.generate();
-        String blackToken = tokens.generate();
+        boolean blackPlayerProvided = request.blackPlayer() != null && !request.blackPlayer().isBlank();
+        String blackToken = blackPlayerProvided ? tokens.generate() : null;
         Instant now = Instant.now();
         GameState state = GameEngine.newGame().state();
         GameSessionEntity entity = new GameSessionEntity(
-                UUID.randomUUID(), request.whitePlayer().trim(), request.blackPlayer().trim(),
-                tokens.hash(whiteToken), tokens.hash(blackToken), statusOf(state),
+                UUID.randomUUID(), request.whitePlayer().trim(),
+                blackPlayerProvided ? request.blackPlayer().trim() : null,
+                tokens.hash(whiteToken), blackPlayerProvided ? tokens.hash(blackToken) : "",
+                blackPlayerProvided ? statusOf(state) : "WAITING_FOR_PLAYER",
                 writeJson(state), now);
         entity = games.saveAndFlush(entity);
 
         return new CreateGameResponse(
                 toResponse(entity, state),
                 new PlayerCredential(Player.WHITE, entity.getWhitePlayer(), whiteToken),
+                blackPlayerProvided
+                        ? new PlayerCredential(Player.BLACK, entity.getBlackPlayer(), blackToken)
+                        : null);
+    }
+
+    @Transactional
+    public JoinGameResponse join(UUID id, JoinGameRequest request) {
+        GameSessionEntity entity = findGame(id);
+        if (entity.getBlackPlayer() != null) {
+            throw new ApiException(HttpStatus.CONFLICT, "GAME_ALREADY_FULL",
+                    "The game already has two players");
+        }
+        String blackToken = tokens.generate();
+        entity.joinBlackPlayer(request.blackPlayer().trim(), tokens.hash(blackToken), Instant.now());
+        entity = games.saveAndFlush(entity);
+        GameResponse response = toResponse(entity, readState(entity));
+        publishAfterCommit(id, response);
+        return new JoinGameResponse(response,
                 new PlayerCredential(Player.BLACK, entity.getBlackPlayer(), blackToken));
     }
 
@@ -92,6 +115,10 @@ public class GameSessionService {
         }
 
         GameSessionEntity entity = findGame(id);
+        if (entity.getBlackPlayer() == null) {
+            throw new ApiException(HttpStatus.CONFLICT, "WAITING_FOR_PLAYER",
+                    "A second player must join before the game can start");
+        }
         Player player = authenticate(entity, playerToken);
         GameState currentState = readState(entity);
         if (player != currentState.currentPlayer()) {

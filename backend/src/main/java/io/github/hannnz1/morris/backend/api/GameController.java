@@ -4,6 +4,8 @@ import io.github.hannnz1.morris.backend.api.GameApiDtos.ActionRequest;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.CreateGameRequest;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.CreateGameResponse;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.GameResponse;
+import io.github.hannnz1.morris.backend.api.GameApiDtos.JoinGameRequest;
+import io.github.hannnz1.morris.backend.api.GameApiDtos.JoinGameResponse;
 import io.github.hannnz1.morris.backend.service.GameSessionService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
@@ -37,6 +39,12 @@ public class GameController {
     @GetMapping("/{id}")
     public GameResponse get(@PathVariable("id") UUID id) {
         return gameSessions.get(id);
+    }
+
+    @PostMapping("/{id}/join")
+    public JoinGameResponse join(@PathVariable("id") UUID id,
+                                 @Valid @RequestBody JoinGameRequest request) {
+        return gameSessions.join(id, request);
     }
 
     @PostMapping("/{id}/actions")

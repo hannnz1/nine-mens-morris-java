@@ -22,7 +22,7 @@ public class GameSessionEntity {
     @Column(name = "white_player", nullable = false, length = 50)
     private String whitePlayer;
 
-    @Column(name = "black_player", nullable = false, length = 50)
+    @Column(name = "black_player", length = 50)
     private String blackPlayer;
 
     @Column(name = "white_token_hash", nullable = false, length = 64)
@@ -103,6 +103,13 @@ public class GameSessionEntity {
     public void updateState(String status, String stateJson, Instant updatedAt) {
         this.status = status;
         this.stateJson = stateJson;
+        this.updatedAt = updatedAt;
+    }
+
+    public void joinBlackPlayer(String playerName, String tokenHash, Instant updatedAt) {
+        this.blackPlayer = playerName;
+        this.blackTokenHash = tokenHash;
+        this.status = "IN_PROGRESS";
         this.updatedAt = updatedAt;
     }
 }

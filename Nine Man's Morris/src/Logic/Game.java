@@ -3,373 +3,220 @@ package Logic;
 import Manager.CandidateMgr;
 import Manager.HintManager;
 import View.Line3;
+import io.github.hannnz1.morris.engine.BoardPosition;
+import io.github.hannnz1.morris.engine.BoardTopology;
+import io.github.hannnz1.morris.engine.GameAction;
+import io.github.hannnz1.morris.engine.GameEngine;
+import io.github.hannnz1.morris.engine.GamePhase;
+import io.github.hannnz1.morris.engine.Piece;
+import io.github.hannnz1.morris.engine.Player;
 
 import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
-
-import static java.lang.System.exit;
+import java.util.stream.Collectors;
 
 /**
- The Game class maintains the game state, tracks the current player's turn (isWhiteRound), the number of tokens
- aside for each player (whiteAside and blackAside), and the number of tokens out of the board (whiteOut and blackOut).
-
- The class also contains methods for handling player clicks on positions, updating the game state, checking for a
- game over condition, getting the winner, and managing the selection and movement of tokens.
- **/
+ * Adapter between the original desktop UI and the shared, framework-independent
+ * rules engine. The UI still works with drawable {@link Position} objects, but
+ * every state transition and legal-action decision is owned by {@link GameEngine}.
+ */
 public class Game {
-    public ArrayList<Position> positions; // List of positions on the game board
-    public Map<Position, ArrayList<Position>> edges; // Map of positions and their neighboring positions
 
-    public Position selectedPos = null; // Currently selected position
+    private static final BoardPosition[] UI_ORDER = {
+            BoardPosition.A1, BoardPosition.A4, BoardPosition.A7, BoardPosition.D7,
+            BoardPosition.G7, BoardPosition.G4, BoardPosition.G1, BoardPosition.D1,
+            BoardPosition.B2, BoardPosition.B4, BoardPosition.B6, BoardPosition.D6,
+            BoardPosition.F6, BoardPosition.F4, BoardPosition.F2, BoardPosition.D2,
+            BoardPosition.C3, BoardPosition.C4, BoardPosition.C5, BoardPosition.D5,
+            BoardPosition.E5, BoardPosition.E4, BoardPosition.E3, BoardPosition.D3
+    };
 
-    public boolean isWhiteRound = true; // Indicates if it's white player's turn
-    private int whiteAside = 9; // Number of white tokens remaining to be placed on the board
-    private int blackAside = 9; // Number of black tokens remaining to be placed on the board
+    public final ArrayList<Position> positions;
+    public final Map<Position, ArrayList<Position>> edges;
+    public Position selectedPos;
+    public boolean isWhiteRound = true;
+    public final ArrayList<Line3> formedLines = new ArrayList<>();
+    public String opPrompt = "";
 
-    private int whiteOut = 0; // Number of white tokens that have been kicked off the board
-    private int blackOut = 0; // Number of black tokens that have been kicked off the board
-    boolean isWaitForKick = false; // Indicates if a player needs to kick off an opponent's token
-
-    private Map<Position, ArrayList<Line3>> straightLines = new HashMap<>(); // Map of positions and the lines they belong to
-    public ArrayList<Line3> formedLines = new ArrayList<>(); // List of lines that have been formed on the board
-
+    private final EnumMap<BoardPosition, Position> uiByBoard =
+            new EnumMap<>(BoardPosition.class);
+    private final Map<Position, BoardPosition> boardByUi = new HashMap<>();
+    private GameEngine engine = GameEngine.newGame();
 
     public Game(ArrayList<Position> positions, Map<Position, ArrayList<Position>> edges) {
+        if (positions.size() != UI_ORDER.length) {
+            throw new IllegalArgumentException("The desktop board must contain 24 positions");
+        }
         this.positions = positions;
         this.edges = edges;
-        initLines(); // Initialize the lines on the board
+        for (int index = 0; index < UI_ORDER.length; index++) {
+            uiByBoard.put(UI_ORDER[index], positions.get(index));
+            boardByUi.put(positions.get(index), UI_ORDER[index]);
+        }
+        syncUi();
+        gatherCandidates();
     }
 
-    private void initLines() {
-        //Initializes the lines used for forming mills on the game board
-        for (int round = 0; round < 3; round ++) {
-            int[] startIndexes = {0, 2, 4, 6};
-            for (var start : startIndexes) {
-                ArrayList<Position> line = new ArrayList<>();
-                for (int inc = 0; inc < 3; inc++) { // generate 1 line
-                    int ind = start + inc;
-                    ind = ind % 8;
-                    ind += round * 8;
-                    line.add(positions.get(ind));
-                }
-
-                for (int inc = 0; inc < 3; inc++) {
-                    int ind = start + inc;
-                    ind = ind % 8;
-                    ind += round * 8;
-                    Position p = positions.get(ind);
-                    if (getStraightLines().containsKey(p)) {
-                        getStraightLines().get(p).add(new Line3(line));
-                    } else {
-                        var lines = new ArrayList<Line3>();
-                        lines.add(new Line3(line));
-                        getStraightLines().put(p, lines);
-                    }
-                }
-            }
-        }
-
-        int[] midIndexes = {1, 3, 5, 7};
-        for (var start : midIndexes) {
-            ArrayList<Position> line = new ArrayList<>();
-            for (int round = 0; round < 3; round ++) {
-                int index = start + round * 8;
-                line.add(positions.get(index));
-            }
-
-            for (int round = 0; round < 3; round ++) {
-                int index = start + round * 8;
-                Position p = positions.get(index);
-                getStraightLines().get(p).add(new Line3(line));
-            }
-        }
-
-    }
-
-    // Checks if the game is over (no more valid moves)
     public boolean gameOver() {
-        return CandidateMgr.getInstance().getCandidates().size() == 0;
+        return engine.state().winner() != null;
     }
 
     public String getWinner() {
-        // Returns the winner of the game
-        if (isWhiteRound) {
-            return "BLACK WINS";
-        }
-
-        return "WHITE WINS";
+        Player winner = engine.state().winner();
+        return winner == null ? "" : winner.name() + " WINS";
     }
 
-    // Update method called in each game loop iteration
-    public void update(double time_step) {
-    }
-
-    private int getIndexByDir(String dir) {
-        String[] orderList = {"nn", "n0", "np", "0p", "pp", "p0", "pn", "0n"};
-        for (int i = 0; i < orderList.length; i ++) {
-            if (dir.equals(orderList[i])) {
-                return i;
-            }
-        }
-        System.out.println("Not found:" + dir);
-        return -1;
-    }
-
-    private int getIndexByString(String s) { //0,n0
-        String[] l = s.split(",");
-        int circleIndex = Integer.parseInt(l[0]);
-        int innerIndex = getIndexByDir(l[1]);
-        if (innerIndex < 0) {
-            System.out.println("ERROR: invalid debug position");
-            exit(1);
-        }
-
-        return circleIndex * 8 + innerIndex;
+    public void update(double timeStep) {
+        // The desktop UI is event driven; no timed domain update is required.
     }
 
     public void debugInit() {
-        this.gatherCandidates(null);
-
-        boolean isDebug = true;
-        if (!isDebug) {
-            return;
-        }
-
-        // init aside
-        whiteAside = 9;
-        blackAside = 9;
-        whiteOut = 9 - whiteAside;
-        blackOut = 9 - blackAside;
-
-
-        this.gatherCandidates(null);
+        engine = GameEngine.newGame();
+        selectedPos = null;
+        syncUi();
+        gatherCandidates();
     }
 
-
-
     public boolean isWhiteRound() {
-        return isWhiteRound;
+        return engine.state().currentPlayer() == Player.WHITE;
     }
 
     public int getWhiteAside() {
-        return whiteAside;
+        return engine.state().whitePiecesToPlace();
     }
 
     public int getBlackAside() {
-        return blackAside;
+        return engine.state().blackPiecesToPlace();
     }
 
     public int getWhiteOut() {
-        return whiteOut;
+        return 9 - getWhiteAside() - engine.state().piecesOnBoard(Player.WHITE);
     }
 
     public int getBlackOut() {
-        return blackOut;
+        return 9 - getBlackAside() - engine.state().piecesOnBoard(Player.BLACK);
     }
 
-    public void clickedPos(Position releasePos) {
-
-
-        if (isWhiteRound) {
-            handleWhiteClick(releasePos);
-        } else {
-            handleBlackClick(releasePos);
-        }
-
-        ArrayList<Line3> removed = new ArrayList<>();
-        for (var line : formedLines) {
-            if (!line.isConnectedLine()) {
-                removed.add(line);
-            }
-        }
-
-        for (var line : removed) {
-            formedLines.remove(line);
-        }
-    }
-
-    // Handles a click on a position by a player with black tokens
-    private void handleBlackClick(Position clickedPos) {
-        if (isWaitForKick) {
-            kick(clickedPos, PositionStatus.WHITE); // kick component
+    public void clickedPos(Position clicked) {
+        BoardPosition target = boardByUi.get(clicked);
+        if (target == null || gameOver()) {
             return;
         }
 
-        if (blackAside > 0) { // put
-            if (clickedPos.getStatus() == PositionStatus.EMPTY) {
-                blackAside--;
-                clickedPos.setStatus(PositionStatus.BLACK);
-                checkFormedNewLineAndUpdate(clickedPos, PositionStatus.BLACK);
+        GamePhase phase = engine.state().phase();
+        if (phase == GamePhase.REMOVE) {
+            if (engine.removablePieces().contains(target)) {
+                apply(GameAction.remove(target));
             }
-        } else {
-            if (selectedPos == null) {
-                if (clickedPos.getStatus() == PositionStatus.BLACK) {
-                    select(clickedPos);
-                }
-            } else {
-                if (clickedPos.getStatus() == PositionStatus.EMPTY) {
-                    moveSelected(clickedPos, PositionStatus.BLACK);
-                }
-
-            }
-        }
-    }
-
-    // Handles a click on a position by a player with white tokens
-    private void handleWhiteClick(Position clickedPos) {
-        if (isWaitForKick) {
-            kick(clickedPos, PositionStatus.BLACK); // kick component
             return;
         }
 
-        if (whiteAside > 0) { // put
-            if (clickedPos.getStatus() == PositionStatus.EMPTY) {
-                whiteAside--;
-                clickedPos.setStatus(PositionStatus.WHITE);
-                checkFormedNewLineAndUpdate(clickedPos, PositionStatus.WHITE);
+        if (phase == GamePhase.PLACING) {
+            if (engine.legalPlacements().contains(target)) {
+                apply(GameAction.place(target));
             }
-        } else {
-            if (selectedPos == null) {
-                if (clickedPos.getStatus() == PositionStatus.WHITE) {
-                    select(clickedPos);
-                }
-            } else {
-                if (clickedPos.getStatus() == PositionStatus.EMPTY) {
-                    moveSelected(clickedPos, PositionStatus.WHITE);
-                }
-
-            }
-        }
-    }
-    public String opPrompt = "";
-    private void gatherCandidates(Position pos) {
-        // Sets the prompt for the current player's turn
-        if (isWaitForKick) {
-            CandidateMgr.getInstance().gatherKickCandidates(this);
-            opPrompt = "Select one enemy token to kick off!";
             return;
         }
 
-        if (isWhiteRound() && whiteAside > 0) {
-            CandidateMgr.getInstance().gatherPutCandidates(this);
-            opPrompt = "Select one position to place your token!";
-        } else if (!isWhiteRound() && blackAside > 0) {
-            CandidateMgr.getInstance().gatherPutCandidates(this);
-            opPrompt = "Select one position to place your token!";
-        } else {
-            if (selectedPos == null) {
-                CandidateMgr.getInstance().gatherSelectCandidates(this);
-                opPrompt = "Select one token you want to move!";
+        Map<BoardPosition, java.util.Set<BoardPosition>> legalMoves = engine.legalMoves();
+        if (selectedPos == null) {
+            if (legalMoves.containsKey(target)) {
+                selectedPos = clicked;
+                gatherCandidates();
             } else {
-                CandidateMgr.getInstance().gatherMoveCandidates(this, pos);
-                opPrompt = "Select where you want to move the token to!";
+                HintManager.getInstance().newTips("Can not select this token to move!");
             }
-        }
-    }
-
-    // Kicks off an enemy token from the board
-    private void kick(Position clickedPos, PositionStatus enemyColor) {
-        if (CandidateMgr.getInstance().getCandidates().contains(clickedPos)) {
-            clickedPos.setStatus(PositionStatus.EMPTY);
-
-            if (enemyColor == PositionStatus.WHITE) {
-                whiteOut++;
-            } else {
-                blackOut++;
-            }
-
-            isWaitForKick = false;
-            isWhiteRound = !isWhiteRound;
-
-            gatherCandidates(null);
-        }
-    }
-
-    // Moves the currently selected token to the clicked position
-    private void moveSelected(Position clickedPos, PositionStatus sta) {
-        if (clickedPos == null ||
-                !CandidateMgr.getInstance().getCandidates().contains(clickedPos)) {
             return;
         }
 
-        selectedPos.setStatus(PositionStatus.EMPTY);
+        BoardPosition source = boardByUi.get(selectedPos);
+        if (legalMoves.getOrDefault(source, java.util.Set.of()).contains(target)) {
+            apply(GameAction.move(source, target));
+        } else if (legalMoves.containsKey(target)) {
+            selectedPos = clicked;
+            gatherCandidates();
+        }
+    }
+
+    private void apply(GameAction action) {
+        engine.apply(action);
         selectedPos = null;
-        clickedPos.setStatus(sta);
-        checkFormedNewLineAndUpdate(clickedPos, sta);
-
+        syncUi();
+        gatherCandidates();
     }
 
-    private boolean checkFormedNewLineAndUpdate(Position clickedPos, PositionStatus sta) {
-        boolean linked = false;
-        // judge......
-        var lines = getStraightLines().get(clickedPos);
-        for (var line : lines) {
-            if (line.formedOneLine(sta) &&
-                    !formedLines.contains(line)) { // avoid duplicate
-                formedLines.add(line);
-                linked = true;
+    private void syncUi() {
+        engine.state().board().forEach((position, piece) ->
+                uiByBoard.get(position).setStatus(toUiStatus(piece)));
+        isWhiteRound = isWhiteRound();
+        formedLines.clear();
+        for (var mill : BoardTopology.mills()) {
+            Piece first = engine.state().board().get(mill.iterator().next());
+            if (first != Piece.EMPTY
+                    && mill.stream().allMatch(point -> engine.state().board().get(point) == first)) {
+                List<Position> line = mill.stream().map(uiByBoard::get)
+                        .collect(Collectors.toList());
+                formedLines.add(new Line3(new ArrayList<>(line)));
             }
         }
+    }
 
-        if (linked) {
-            isWaitForKick = true;
+    private PositionStatus toUiStatus(Piece piece) {
+        return switch (piece) {
+            case WHITE -> PositionStatus.WHITE;
+            case BLACK -> PositionStatus.BLACK;
+            case EMPTY -> PositionStatus.EMPTY;
+        };
+    }
+
+    private void gatherCandidates() {
+        GamePhase phase = engine.state().phase();
+        if (phase == GamePhase.REMOVE) {
+            CandidateMgr.getInstance().setCandidates(toUiPositions(engine.removablePieces()));
+            opPrompt = "Select one enemy token to kick off!";
+        } else if (phase == GamePhase.PLACING) {
+            CandidateMgr.getInstance().setCandidates(toUiPositions(engine.legalPlacements()));
+            opPrompt = "Select one position to place your token!";
+        } else if (phase == GamePhase.GAME_OVER) {
+            CandidateMgr.getInstance().setCandidates(java.util.Set.of());
+            opPrompt = "Game over";
+        } else if (selectedPos == null) {
+            CandidateMgr.getInstance().setCandidates(toUiPositions(engine.legalMoves().keySet()));
+            opPrompt = "Select one token you want to move!";
         } else {
-            isWhiteRound = !isWhiteRound;
+            BoardPosition source = boardByUi.get(selectedPos);
+            CandidateMgr.getInstance().setCandidates(
+                    toUiPositions(engine.legalMoves().getOrDefault(source, java.util.Set.of())));
+            opPrompt = "Select where you want to move the token to!";
         }
-
-        this.gatherCandidates(null);
-        return linked;
     }
 
-
-    private void select(Position clickedPos) {
-        if (clickedPos == null) {
-            return;
-        }
-
-        if (!CandidateMgr.getInstance().getCandidates().contains(clickedPos)) {
-            HintManager.getInstance().newTips("Can not select this token to move!");
-            return;
-        }
-
-        selectedPos = clickedPos;
-        this.gatherCandidates(clickedPos);
+    private java.util.Set<Position> toUiPositions(java.util.Set<BoardPosition> boardPositions) {
+        java.util.Set<Position> result = new java.util.HashSet<>();
+        boardPositions.forEach(position -> result.add(uiByBoard.get(position)));
+        return result;
     }
 
-    public boolean hasAnyEmptyNeighbor(Position clickedPos) {
-        var neighList = edges.get(clickedPos);
-        for (var n : neighList) {
-            if (n.getStatus() == PositionStatus.EMPTY) {
-                return true;
-            }
-        }
-        return false;
+    // Compatibility helpers retained for the legacy hint classes.
+    public boolean hasAnyEmptyNeighbor(Position position) {
+        BoardPosition boardPosition = boardByUi.get(position);
+        return BoardTopology.neighboursOf(boardPosition).stream()
+                .anyMatch(point -> engine.state().board().get(point) == Piece.EMPTY);
     }
 
-    public boolean isAMillPieceInLine3(Position p) {
-        for (var l : formedLines) {
-            if (l.contains(p)) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    public Map<Position, ArrayList<Line3>> getStraightLines() {
-        return straightLines;
-    }
-
-    public void setStraightLines(Map<Position, ArrayList<Line3>> straightLines) {
-        this.straightLines = straightLines;
+    public boolean isAMillPieceInLine3(Position position) {
+        BoardPosition boardPosition = boardByUi.get(position);
+        Piece piece = engine.state().board().get(boardPosition);
+        return piece != Piece.EMPTY && BoardTopology.mills().stream()
+                .filter(mill -> mill.contains(boardPosition))
+                .anyMatch(mill -> mill.stream()
+                        .allMatch(point -> engine.state().board().get(point) == piece));
     }
 
     public String getSide() {
-        if (isWhiteRound) {
-            return "WHITE: ";
-        }
-
-        return "BLACK: ";
+        return isWhiteRound() ? "WHITE: " : "BLACK: ";
     }
 }

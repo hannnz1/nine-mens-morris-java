@@ -11,13 +11,13 @@ The repository now contains the original desktop game, a framework-independent r
 ## What It Implements
 
 - Complete placement, movement, flying, mill, removal, and victory rules.
-- Original local two-player Java desktop client with hints and tutorials.
+- Original local two-player Java desktop client with hints and tutorials, now backed by the shared rules engine.
 - REST endpoints for creating, reading, and playing persistent games.
 - One-time 256-bit player credentials; only SHA-256 token digests are stored.
 - JPA `@Version` optimistic locking plus an explicit client version check.
 - Per-game idempotency keys that make safe HTTP retries possible.
 - Flyway-managed PostgreSQL schema and useful query indexes.
-- STOMP/WebSocket game updates on `/topic/games/{gameId}`.
+- Token-authenticated STOMP/WebSocket game updates on `/topic/games/{gameId}`.
 - Stable JSON validation and error responses without stack-trace leakage.
 - JUnit rule tests and Spring Boot API integration tests.
 - Multi-stage, non-root Docker image and Docker Compose environment.
@@ -38,7 +38,7 @@ The Maven modules have deliberately different responsibilities:
 
 - `game-engine` — immutable game state and deterministic rules with no UI, Spring, or database dependency.
 - `backend` — controllers, validation, authorization, transactions, persistence, error handling, and WebSocket delivery.
-- `legacy-desktop` — builds the original submission from `Nine Man's Morris/src` without discarding its UI or academic history.
+- `legacy-desktop` — preserves the original UI and academic history while adapting its clicks and rendering state to `game-engine`.
 
 The backend stores each rules-engine snapshot as JSON. Relational columns retain the fields used for identity, status filtering, concurrency, authorization, and auditing. This keeps the domain engine independent while PostgreSQL still enforces primary keys, foreign keys, unique idempotency keys, and indexed access paths.
 
@@ -73,19 +73,35 @@ To deliberately delete the local database too, use `docker compose down -v`.
 
 ## Try the REST API
 
-Create a game. The two raw credentials are returned only by this endpoint, so each token should be given only to its player:
+Create a waiting game. Only White's raw credential is returned to the creator:
 
 ```powershell
 $created = Invoke-RestMethod `
   -Method Post `
   -Uri http://localhost:8080/api/v1/games `
   -ContentType 'application/json' `
-  -Body '{"whitePlayer":"Alice","blackPlayer":"Bob"}'
+  -Body '{"whitePlayer":"Alice"}'
 
 $gameId = $created.game.id
 $whiteToken = $created.whiteCredential.token
 $created
 ```
+
+The second player joins separately and receives only the Black credential:
+
+```powershell
+$joined = Invoke-RestMethod `
+  -Method Post `
+  -Uri "http://localhost:8080/api/v1/games/$gameId/join" `
+  -ContentType 'application/json' `
+  -Body '{"blackPlayer":"Bob"}'
+
+$blackToken = $joined.credential.token
+```
+
+For trusted local demos, creation remains backward compatible: supplying both
+`whitePlayer` and `blackPlayer` creates an immediately playable game and returns
+both credentials.
 
 Place White's first piece. `expectedVersion` prevents a stale browser from overwriting a newer move; `Idempotency-Key` prevents a network retry from applying the move twice:
 
@@ -109,7 +125,7 @@ Read public game state without a token:
 Invoke-RestMethod "http://localhost:8080/api/v1/games/$gameId"
 ```
 
-Actions use `PLACE`, `MOVE`, or `REMOVE`. Board positions use identifiers such as `A1`, `D1`, and `G7`. A STOMP client can connect at `/ws` and subscribe to `/topic/games/{gameId}`.
+Actions use `PLACE`, `MOVE`, or `REMOVE`. Board positions use identifiers such as `A1`, `D1`, and `G7`. A STOMP client can connect at `/ws` and subscribe to `/topic/games/{gameId}` by including the native `X-Player-Token` header on its `SUBSCRIBE` frame.
 
 ## Run Without Docker
 
@@ -167,13 +183,13 @@ Alternatively, open `Nine Man's Morris/src/Engine.java` in IntelliJ IDEA and run
 ## Security Notes
 
 - Player tokens are generated with `SecureRandom`, returned once, compared in constant time, and never stored in plaintext.
-- Write endpoints authorize the token against the selected game and enforce the active player.
+- Write endpoints and game-topic subscriptions authorize the token against the selected game; actions also enforce the active player.
 - Bean Validation constrains request data; game rules are independently checked by the domain engine.
 - API errors use stable codes and do not expose internal exception messages or stack traces.
 - Request-header size and credential length are bounded, and the container runs as an unprivileged user.
 - Secrets are supplied through environment variables; `.env` is ignored by Git and `.env.example` contains no usable production secret.
 
-For an internet-facing production deployment, add TLS at a reverse proxy, a managed secret store, rate limiting, token expiry/rotation, authenticated WebSocket subscriptions, centralized logs/metrics, backups, and multi-instance event delivery rather than the in-memory STOMP broker.
+For an internet-facing production deployment, add TLS at a reverse proxy, a managed secret store, rate limiting, token expiry/rotation, centralized logs/metrics, backups, and multi-instance event delivery rather than the in-memory STOMP broker.
 
 ## Design Documentation
 
