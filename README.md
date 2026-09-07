@@ -4,13 +4,13 @@
 
 **A Java board game with a shared rules engine, a desktop client, and a persistent multiplayer backend.**
 
-Originally developed as a collaborative Monash University FIT3077 project, Nine Men's Morris has been extended into a modular Java application. The desktop game and Spring Boot API use the same domain engine, while the backend handles player authorization, concurrent moves, retry-safe writes, and real-time match updates.
+Nine Men's Morris is a refactored, multi-module Java application that separates game rules from presentation and persistence. The desktop client and Spring Boot API share a framework-independent domain engine. The backend adds persistent multiplayer sessions, player-token authorization, optimistic concurrency control, idempotent actions and real-time updates.
 
 **Java 17 · Spring Boot · PostgreSQL · JPA / Hibernate · Flyway · STOMP / WebSocket · Maven · Docker**
 
-[Quick start](#quick-start) · [Architecture](#architecture) · [API walkthrough](#try-the-rest-api) · [Tests](#build-and-test) · [Design documents](#design-documentation)
+[Quick start](#quick-start) · [Architecture](#architecture) · [API walkthrough](#try-the-rest-api) · [Tests](#build-and-test) · [Code guide](#code-guide)
 
-![Original desktop gameplay with move hints](<Screenshots/Hints prompting Black selection.png>)
+![Desktop gameplay with move hints](<Screenshots/Hints prompting Black selection.png>)
 
 *The screenshot shows the original desktop client. The published backend exposes REST and STOMP interfaces; it does not yet include a browser game client.*
 
@@ -31,7 +31,7 @@ Originally developed as a collaborative Monash University FIT3077 project, Nine 
 
 Two players take turns placing nine pieces on a 24-position board. Completing a line of three creates a **mill**, allowing a legal opponent piece to be removed. Once placement is complete, pieces move along connected positions; a player with three pieces can fly to an empty position. The engine implements placement, movement, flying, mill formation, removal restrictions and victory conditions.
 
-The original desktop client includes local two-player play, move hints and tutorial screens.
+The desktop client includes local two-player play, move hints and tutorial screens.
 
 ## Architecture
 
@@ -51,7 +51,7 @@ The Maven modules have deliberately different responsibilities:
 
 - `game-engine` — immutable game state and deterministic rules with no UI, Spring, or database dependency.
 - `backend` — controllers, validation, authorization, transactions, persistence, error handling, and WebSocket delivery.
-- `legacy-desktop` — preserves the original UI and academic history while adapting its clicks and rendering state to `game-engine`.
+- `legacy-desktop` — adapts desktop input and rendering to `game-engine`, keeping game rules outside the presentation layer.
 
 The backend stores each rules-engine snapshot as JSON. Relational columns retain the fields used for identity, status filtering, concurrency, authorization, and auditing. This keeps the domain engine independent while PostgreSQL still enforces primary keys, foreign keys, unique idempotency keys, and indexed access paths.
 
@@ -204,7 +204,7 @@ The suite covers the original desktop rules, all 24 positions and 32 graph edges
 
 API integration tests use H2 in PostgreSQL compatibility mode. They do not replace testing PostgreSQL-specific concurrency and deployment behavior against a real PostgreSQL instance; no load-test throughput or latency claim is made here.
 
-## Run the Original Desktop Game
+## Run the Desktop Client
 
 Package and launch the executable desktop JAR:
 
@@ -245,23 +245,23 @@ Nine Man's Morris/    Original desktop source and tutorial assets
 src/test/             Original desktop regression tests
 .github/workflows/    Maven CI
 Screenshots/          Desktop gameplay and tutorial images
-Design Rationale/     Original team design documents
+Design Rationale/     Historical design documents
 docker-compose.yml    Local API and PostgreSQL services
 ```
 
-## Design Documentation
+## Code Guide
 
-- [Domain model](Group43_Domain_Model.pdf)
-- [Revised class diagram](<Revised Architecture/Group43_Revised_Class_Diagram.pdf>)
-- [Sprint 4 design rationale](Design%20Rationale/Group_43_Sprint_4_Written_Work.pdf)
-- [Sequence diagrams](<Sequence Diagrams>)
-- [UI designs](<UI Design>)
-- [Gameplay screenshots](Screenshots)
+Start with these modules to follow the refactored implementation:
+
+- [Rules engine](game-engine/src/main/java): board topology, game state and legal actions, independent of Spring and persistence.
+- [Backend](backend/src/main/java/io/github/hannnz1/morris/backend): API contracts, service transactions, authorization, persistence and STOMP delivery.
+- [Database migrations](backend/src/main/resources/db/migration): versioned schema for game sessions and idempotency records.
+- [Backend integration tests](backend/src/test): request validation, player authorization, rule failures and retry/version behavior.
+- [Desktop adapter](legacy-desktop/pom.xml): builds the desktop client against the shared engine.
+- [CI workflow](.github/workflows/ci.yml): verifies the Maven reactor on pushes and pull requests.
+
+The existing diagrams and design files remain in the repository as historical reference; the current module sources define the refactored architecture.
 
 ## Third-Party Component
 
 Rendering and input handling use an adapted copy of Princeton University's `StdDraw`, authored by Robert Sedgewick and Kevin Wayne. See the [Princeton StdDraw documentation](https://introcs.cs.princeton.edu/java/stdlib/StdDraw.java.html) and the attribution in `Nine Man's Morris/src/View/StdDraw.java`.
-
-## Academic Context
-
-The original game was created by Group 43 for Monash University FIT3077 (Semester 1, 2023). This repository preserves that collaborative academic work alongside subsequent backend and shared-engine development. The GitHub history begins with the import and does not contain the original Monash GitLab commit history. The post-course backend refactor should be described separately from the original group work in applications and interviews.
