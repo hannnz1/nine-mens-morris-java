@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Nine Men's Morris real-time multiplayer board">
+    <title>Nine Men's Morris · Live Match</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23291f19'/%3E%3Ccircle cx='18' cy='18' r='7' fill='%23f2e7d5'/%3E%3Ccircle cx='46' cy='18' r='7' fill='%23d16a45'/%3E%3Ccircle cx='32' cy='46' r='7' fill='%23f2e7d5'/%3E%3C/svg%3E">
+    <link rel="stylesheet" href="/styles.css">
+    <script defer src="/app.js"></script>
+</head>
+<body>
+<div class="page-glow page-glow-left" aria-hidden="true"></div>
+<div class="page-glow page-glow-right" aria-hidden="true"></div>
+
+<main class="app-shell" data-app>
+    <header class="topbar">
+        <a class="brand" href="/" aria-label="Nine Men's Morris home">
+            <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span>
+                <strong>Nine Men’s Morris</strong>
+                <small>Live multiplayer</small>
+            </span>
+        </a>
+        <div class="connection-pill" id="connectionPill" data-state="offline">
+            <span class="connection-dot" aria-hidden="true"></span>
+            <span id="connectionText">准备连接</span>
+        </div>
+    </header>
+
+    <section class="hero" id="setupPanel">
+        <div class="hero-copy">
+            <p class="eyebrow">REAL-TIME BOARD · STOMP / WEBSOCKET</p>
+            <h1>两扇浏览器，<br><em>同一盘棋。</em></h1>
+            <p class="hero-lead">一方创建对局并分享编号，另一方加入。每次操作经服务端确认后，会立即推送到双方棋盘。</p>
+            <div class="feature-row" aria-label="Highlights">
+                <span>事务提交后推送</span>
+                <span>Token订阅鉴权</span>
+                <span>版本冲突保护</span>
+            </div>
+        </div>
+
+        <div class="entry-grid">
+            <form class="entry-card entry-card-primary" id="createForm">
+                <div class="entry-number">01</div>
+                <div>
+                    <p class="card-kicker">WHITE · HOST</p>
+                    <h2>创建新对局</h2>
+                    <p>成为白方，等待另一位玩家加入。</p>
+                </div>
+                <label>
+                    <span>玩家名称</span>
+                    <input id="createName" name="whitePlayer" maxlength="50" value="Alice" autocomplete="nickname" required>
+                </label>
+                <button class="button button-dark" type="submit">创建并进入棋盘 <span>→</span></button>
+            </form>
+
+            <form class="entry-card" id="joinForm">
+                <div class="entry-number">02</div>
+                <div>
+                    <p class="card-kicker">BLACK · GUEST</p>
+                    <h2>加入已有对局</h2>
+                    <p>输入白方分享的对局编号，成为黑方。</p>
+                </div>
+                <label>
+                    <span>玩家名称</span>
+                    <input id="joinName" name="blackPlayer" maxlength="50" value="Bob" autocomplete="nickname" required>
+                </label>
+                <label>
+                    <span>对局编号</span>
+                    <input id="joinGameId" name="gameId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" required>
+                </label>
+                <button class="button button-outline" type="submit">加入并实时订阅 <span>→</span></button>
+            </form>
+        </div>
+    </section>
+
+    <section class="game-layout is-preview" id="gamePanel" aria-label="Live game board">
+        <aside class="game-sidebar">
+            <div>
+                <p class="eyebrow">MATCH CONTROL</p>
+                <h2>对局信息</h2>
+            </div>
+            <dl class="match-meta">
+                <div><dt>你的身份</dt><dd id="playerSide">—</dd></div>
+                <div><dt>对局版本</dt><dd id="gameVersion">0</dd></div>
+                <div><dt>当前阶段</dt><dd id="gamePhase">等待开始</dd></div>
+                <div><dt>轮到</dt><dd id="currentPlayer">—</dd></div>
+            </dl>
+            <div class="game-id-block">
+                <span>对局编号</span>
+                <code id="gameIdText">创建对局后显示</code>
+                <button class="text-button" id="copyGameId" type="button" disabled>复制编号</button>
+            </div>
+            <button class="button button-quiet" id="leaveGame" type="button">返回入口</button>
+        </aside>
+
+        <section class="board-card">
+            <div class="turn-banner">
+                <div>
+                    <span class="turn-label">CURRENT ACTION</span>
+                    <strong id="actionPrompt">创建或加入对局后即可操作</strong>
+                </div>
+                <span class="live-badge"><i></i> LIVE</span>
+            </div>
+
+            <div class="board-wrap">
+                <div class="morris-board" id="board" aria-label="Nine Men's Morris board">
+                    <div class="board-square board-square-outer" aria-hidden="true"></div>
+                    <div class="board-square board-square-middle" aria-hidden="true"></div>
+                    <div class="board-square board-square-inner" aria-hidden="true"></div>
+                    <div class="board-bridge bridge-top" aria-hidden="true"></div>
+                    <div class="board-bridge bridge-right" aria-hidden="true"></div>
+                    <div class="board-bridge bridge-bottom" aria-hidden="true"></div>
+                    <div class="board-bridge bridge-left" aria-hidden="true"></div>
+                </div>
+            </div>
+
+            <div class="legend">
+                <span><i class="legend-piece white"></i> White</span>
+                <span><i class="legend-piece black"></i> Black</span>
+                <span><i class="legend-ring"></i> 可操作位置</span>
+            </div>
+        </section>
+
+        <aside class="activity-panel">
+            <div class="player-card white-player">
+                <span class="player-color"></span>
+                <div><small>WHITE</small><strong id="whitePlayerName">Alice</strong></div>
+                <span class="piece-count" id="whitePieces">9</span>
+            </div>
+            <div class="player-card black-player">
+                <span class="player-color"></span>
+                <div><small>BLACK</small><strong id="blackPlayerName">等待加入</strong></div>
+                <span class="piece-count" id="blackPieces">9</span>
+            </div>
+            <div class="activity-log-card">
+                <div class="section-heading">
+                    <div><p class="card-kicker">LIVE FEED</p><h3>实时事件</h3></div>
+                    <button class="icon-button" id="refreshGame" type="button" title="Refresh game" disabled>↻</button>
+                </div>
+                <ol class="activity-log" id="activityLog" aria-live="polite">
+                    <li><time>—</time><span>等待建立对局会话</span></li>
+                </ol>
+            </div>
+        </aside>
+    </section>
+</main>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

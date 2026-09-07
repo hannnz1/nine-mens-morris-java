@@ -2,9 +2,9 @@
 
 [![Java CI](https://github.com/hannnz1/nine-mens-morris-java/actions/workflows/ci.yml/badge.svg)](https://github.com/hannnz1/nine-mens-morris-java/actions/workflows/ci.yml)
 
-**A Java board game with a shared rules engine, a desktop client, and a persistent multiplayer backend.**
+**A Java board game with a shared rules engine, desktop and browser clients, and a persistent multiplayer backend.**
 
-Nine Men's Morris is a refactored, multi-module Java application that separates game rules from presentation and persistence. The desktop client and Spring Boot API share a framework-independent domain engine. The backend adds persistent multiplayer sessions, player-token authorization, optimistic concurrency control, idempotent actions and real-time updates.
+Nine Men's Morris is a refactored, multi-module Java application that separates game rules from presentation and persistence. The desktop client and Spring Boot API share a framework-independent domain engine. The backend adds persistent multiplayer sessions, player-token authorization, optimistic concurrency control, idempotent actions and real-time updates. A browser client provides a playable board using REST actions and STOMP subscriptions, with no frontend build step or CDN dependency.
 
 **Java 17 · Spring Boot · PostgreSQL · JPA / Hibernate · Flyway · STOMP / WebSocket · Maven · Docker**
 
@@ -12,12 +12,13 @@ Nine Men's Morris is a refactored, multi-module Java application that separates 
 
 ![Desktop gameplay with move hints](<Screenshots/Hints prompting Black selection.png>)
 
-*The screenshot shows the original desktop client. The published backend exposes REST and STOMP interfaces; it does not yet include a browser game client.*
+*The screenshot shows the original desktop client. The browser client is served separately by Spring Boot at `/`; the screenshot is not a browser UI preview.*
 
 ## Project Highlights
 
 | Capability | Implementation | Purpose |
 | --- | --- | --- |
+| Browser gameplay | Responsive 24-position board, legal-move highlighting, session restoration and reconnect | Plays against the same backend and rules engine |
 | Shared domain model | Framework-independent Java rules engine | Keeps desktop and backend rule behavior in one place |
 | Multiplayer lifecycle | Create a waiting game, join as the second player, submit actions | Separates match creation from player participation |
 | Concurrent updates | Client `expectedVersion` and JPA `@Version` | Rejects stale moves instead of silently overwriting newer state |
@@ -38,7 +39,7 @@ The desktop client includes local two-player play, move hints and tutorial scree
 ```mermaid
 flowchart LR
     Desktop[Java desktop client] --> Engine[Pure Java game engine]
-    Client[REST / STOMP client] --> API[Spring Boot backend]
+    Client[Browser client / REST and STOMP] --> API[Spring Boot backend]
     API --> Service[Game service and transactions]
     Service --> Engine
     Service --> DB[(PostgreSQL)]
@@ -92,6 +93,34 @@ docker compose down
 ```
 
 The API runs at `http://localhost:8080`; the health endpoint is `/actuator/health`. PostgreSQL is reachable by the backend on the Compose network and is not published to a host port by this configuration.
+
+## Play in the Browser
+
+Once the backend is healthy, open **http://localhost:8080**. The browser assets are bundled into the backend JAR and Docker image.
+
+1. In one window, enter a player name and select **创建并进入棋盘** to create a game as White.
+2. Copy the game ID displayed in the match panel.
+3. Open a separate window or private browsing session, enter another player name and the game ID, then select **加入并实时订阅** as Black.
+4. Select highlighted positions to place pieces. After forming a mill, select a highlighted opponent piece to remove it. Movement and flying use source and destination selections.
+5. Moves are submitted through REST; authenticated STOMP subscriptions deliver game updates to the other player. The refresh button fetches current state when needed.
+
+Player credentials are kept in that tab's `sessionStorage`. Refreshing the tab restores the session; leaving clears its local credential, so keep the tab open if you want to retain access. The interface is currently in Chinese.
+
+The client reconnects its WebSocket after a disconnection and refreshes state after a reported version conflict. Browser actions receive fresh idempotency keys; the API's saved-response retry behavior is demonstrated separately by the script below.
+
+### Automated API Demo
+
+The PowerShell script checks game creation, joining, alternating placements, mill formation and removal, an identical idempotent retry, rejection of a stale version and the final persisted board.
+
+```powershell
+# Start the local Docker environment and run the demo:
+.\scripts\demo-multiplayer.ps1 -StartDocker
+
+# Or use an already running backend:
+.\scripts\demo-multiplayer.ps1 -BaseUrl http://localhost:8080
+```
+
+The script does not print raw player credentials. It creates a new game and leaves services running for inspection. This REST demo does not verify browser rendering or WebSocket delivery.
 
 ## Try the REST API
 
@@ -204,6 +233,13 @@ The suite covers the original desktop rules, all 24 positions and 32 graph edges
 
 API integration tests use H2 in PostgreSQL compatibility mode. They do not replace testing PostgreSQL-specific concurrency and deployment behavior against a real PostgreSQL instance; no load-test throughput or latency claim is made here.
 
+### Local Sync Verification — 2026-09-08
+
+- `mvn --batch-mode --no-transfer-progress verify`: passed; 22 tests, zero failures, errors or skips.
+- Browser JavaScript syntax and PowerShell demo syntax: passed.
+- All three browser assets match their packaged JAR entries; all 23 JavaScript DOM ID references exist in the HTML.
+- PostgreSQL Docker and the multiplayer demo were not run in this verification because the Docker Linux engine was unavailable. Two-window browser/STOMP behavior still requires runtime verification; Maven tests alone do not establish it.
+
 ## Run the Desktop Client
 
 Package and launch the executable desktop JAR:
@@ -240,6 +276,8 @@ For an internet-facing production deployment, add TLS at a reverse proxy, a mana
 ```text
 game-engine/          Pure Java game state, board model and rules
 backend/              Spring Boot API, persistence and real-time delivery
+  src/main/resources/static/  Browser HTML, CSS and JavaScript
+scripts/              Reproducible multiplayer REST demo
 legacy-desktop/       Maven adapter for the original desktop application
 Nine Man's Morris/    Original desktop source and tutorial assets
 src/test/             Original desktop regression tests
