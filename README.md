@@ -1,37 +1,50 @@
-# Nine Men's Morris — Java Desktop & Spring Boot Backend
+# Nine Men's Morris
 
 [![Java CI](https://github.com/hannnz1/nine-mens-morris-java/actions/workflows/ci.yml/badge.svg)](https://github.com/hannnz1/nine-mens-morris-java/actions/workflows/ci.yml)
 
-A full implementation of **Nine Men's Morris**, originally developed by Group 43 for Monash University FIT3077 (Semester 1, 2023) and subsequently refactored into a backend-oriented Java project.
+**A Java board game with a shared rules engine, a desktop client, and a persistent multiplayer backend.**
 
-The repository now contains the original desktop game, a framework-independent rules engine, and a Spring Boot multiplayer API backed by PostgreSQL. The backend demonstrates transaction boundaries, optimistic concurrency control, idempotent writes, database migrations, token-based player authorization, real-time updates, automated tests, CI, and container deployment.
+Originally developed as a collaborative Monash University FIT3077 project, Nine Men's Morris has been extended into a modular Java application. The desktop game and Spring Boot API use the same domain engine, while the backend handles player authorization, concurrent moves, retry-safe writes, and real-time match updates.
 
-![Nine Men's Morris gameplay](<Screenshots/Hints prompting Black selection.png>)
+**Java 17 · Spring Boot · PostgreSQL · JPA / Hibernate · Flyway · STOMP / WebSocket · Maven · Docker**
 
-## What It Implements
+[Quick start](#quick-start) · [Architecture](#architecture) · [API walkthrough](#try-the-rest-api) · [Tests](#build-and-test) · [Design documents](#design-documentation)
 
-- Complete placement, movement, flying, mill, removal, and victory rules.
-- Original local two-player Java desktop client with hints and tutorials, now backed by the shared rules engine.
-- REST endpoints for creating, reading, and playing persistent games.
-- One-time 256-bit player credentials; only SHA-256 token digests are stored.
-- JPA `@Version` optimistic locking plus an explicit client version check.
-- Per-game idempotency keys that make safe HTTP retries possible.
-- Flyway-managed PostgreSQL schema and useful query indexes.
-- Token-authenticated STOMP/WebSocket game updates on `/topic/games/{gameId}`.
-- Stable JSON validation and error responses without stack-trace leakage.
-- JUnit rule tests and Spring Boot API integration tests.
-- Multi-stage, non-root Docker image and Docker Compose environment.
+![Original desktop gameplay with move hints](<Screenshots/Hints prompting Black selection.png>)
+
+*The screenshot shows the original desktop client. The published backend exposes REST and STOMP interfaces; it does not yet include a browser game client.*
+
+## Project Highlights
+
+| Capability | Implementation | Purpose |
+| --- | --- | --- |
+| Shared domain model | Framework-independent Java rules engine | Keeps desktop and backend rule behavior in one place |
+| Multiplayer lifecycle | Create a waiting game, join as the second player, submit actions | Separates match creation from player participation |
+| Concurrent updates | Client `expectedVersion` and JPA `@Version` | Rejects stale moves instead of silently overwriting newer state |
+| Retry-safe actions | Per-game idempotency keys and request fingerprints | Replays a saved response for an identical retry; rejects conflicting key reuse |
+| Transactional persistence | Game state and idempotency record in one transaction | Keeps the move and its retry record consistent |
+| Real-time delivery | Authenticated STOMP subscriptions; notifications after commit | Publishes committed game state to connected players |
+| Player credentials | Random tokens, stored as SHA-256 digests | Authorizes actions and subscriptions without storing raw credentials |
+| Reproducible development | Maven modules, automated tests, Flyway, CI and Docker Compose | Provides a repeatable build and local deployment workflow |
+
+## Game Rules
+
+Two players take turns placing nine pieces on a 24-position board. Completing a line of three creates a **mill**, allowing a legal opponent piece to be removed. Once placement is complete, pieces move along connected positions; a player with three pieces can fly to an empty position. The engine implements placement, movement, flying, mill formation, removal restrictions and victory conditions.
+
+The original desktop client includes local two-player play, move hints and tutorial screens.
 
 ## Architecture
 
-```text
-Desktop UI (legacy-desktop) ----\
-                                >---- Pure Java rules (game-engine)
-REST / WebSocket (backend) -----/               |
-       |                                        |
-       +-- service + transactions               |
-       +-- JPA optimistic locking               |
-       +-- Flyway ------------------------ PostgreSQL
+```mermaid
+flowchart LR
+    Desktop[Java desktop client] --> Engine[Pure Java game engine]
+    Client[REST / STOMP client] --> API[Spring Boot backend]
+    API --> Service[Game service and transactions]
+    Service --> Engine
+    Service --> DB[(PostgreSQL)]
+    Service --> Commit[After-commit event]
+    Commit --> WS[STOMP broker]
+    WS --> Client
 ```
 
 The Maven modules have deliberately different responsibilities:
@@ -42,16 +55,25 @@ The Maven modules have deliberately different responsibilities:
 
 The backend stores each rules-engine snapshot as JSON. Relational columns retain the fields used for identity, status filtering, concurrency, authorization, and auditing. This keeps the domain engine independent while PostgreSQL still enforces primary keys, foreign keys, unique idempotency keys, and indexed access paths.
 
-## Requirements
+## Quick Start
+
+### Requirements
 
 Choose either:
 
-- Docker Desktop with Docker Compose; or
+- Docker with the Compose plugin (Docker Desktop on Windows/macOS); or
 - JDK 17, Maven 3.9+, and PostgreSQL 16.
 
-## Run the Backend with Docker
+### Run the Backend with Docker
 
-From the repository root in PowerShell:
+Clone the repository, then start the API and database from PowerShell:
+
+```powershell
+git clone https://github.com/hannnz1/nine-mens-morris-java.git
+cd nine-mens-morris-java
+```
+
+On Linux/macOS, use `cp .env.example .env` in place of `Copy-Item`; the Docker commands are unchanged.
 
 ```powershell
 Copy-Item .env.example .env
@@ -69,9 +91,22 @@ Stop the application without deleting its data:
 docker compose down
 ```
 
-To deliberately delete the local database too, use `docker compose down -v`.
+The API runs at `http://localhost:8080`; the health endpoint is `/actuator/health`. PostgreSQL is reachable by the backend on the Compose network and is not published to a host port by this configuration.
 
 ## Try the REST API
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| `POST` | `/api/v1/games` | Create a game and receive the creator's credential |
+| `POST` | `/api/v1/games/{id}/join` | Join a waiting game and receive the second player's credential |
+| `GET` | `/api/v1/games/{id}` | Read public game state |
+| `POST` | `/api/v1/games/{id}/actions` | Apply an authorized action using a version and idempotency key |
+
+### Two-Player Walkthrough
+
+Keep player credentials in the local shell session; they are needed for subsequent actions.
+
+
 
 Create a waiting game. Only White's raw credential is returned to the creator:
 
@@ -84,7 +119,7 @@ $created = Invoke-RestMethod `
 
 $gameId = $created.game.id
 $whiteToken = $created.whiteCredential.token
-$created
+$created.game
 ```
 
 The second player joins separately and receives only the Black credential:
@@ -97,6 +132,7 @@ $joined = Invoke-RestMethod `
   -Body '{"blackPlayer":"Bob"}'
 
 $blackToken = $joined.credential.token
+$currentVersion = $joined.game.version
 ```
 
 For trusted local demos, creation remains backward compatible: supplying both
@@ -116,7 +152,12 @@ Invoke-RestMethod `
   -Uri "http://localhost:8080/api/v1/games/$gameId/actions" `
   -Headers $headers `
   -ContentType 'application/json' `
-  -Body '{"type":"PLACE","from":null,"to":"A1","expectedVersion":0}'
+  -Body (@{
+    type = 'PLACE'
+    from = $null
+    to = 'A1'
+    expectedVersion = $currentVersion
+  } | ConvertTo-Json)
 ```
 
 Read public game state without a token:
@@ -135,7 +176,8 @@ Create a PostgreSQL database, then provide connection variables:
 $env:DB_URL = 'jdbc:postgresql://localhost:5432/morris'
 $env:DB_USERNAME = 'morris'
 $env:DB_PASSWORD = 'your-password'
-mvn -pl backend -am spring-boot:run
+mvn -pl backend -am package
+java -jar .\backend\target\backend-1.0.0-SNAPSHOT.jar
 ```
 
 The API listens on `http://localhost:8080` by default.
@@ -158,7 +200,9 @@ docker run --rm `
   mvn --batch-mode --no-transfer-progress clean verify
 ```
 
-The suite covers the original desktop rules, all 24 positions and 32 graph edges, placement, movement, flying, mills, removal and victory, plus API creation, validation, authorization, optimistic version conflicts, rule errors, and idempotent retries. Every push and pull request to `main` runs the same Maven verification through GitHub Actions.
+The suite covers the original desktop rules, all 24 positions and 32 graph edges, placement, movement, flying, mills, removal and victory, plus API creation, validation, authorization, optimistic version conflicts, rule errors, and idempotent retries. GitHub Actions is configured to run `mvn verify` on pushes and pull requests targeting `main`. The badge links to the actual workflow status.
+
+API integration tests use H2 in PostgreSQL compatibility mode. They do not replace testing PostgreSQL-specific concurrency and deployment behavior against a real PostgreSQL instance; no load-test throughput or latency claim is made here.
 
 ## Run the Original Desktop Game
 
@@ -191,6 +235,20 @@ Alternatively, open `Nine Man's Morris/src/Engine.java` in IntelliJ IDEA and run
 
 For an internet-facing production deployment, add TLS at a reverse proxy, a managed secret store, rate limiting, token expiry/rotation, centralized logs/metrics, backups, and multi-instance event delivery rather than the in-memory STOMP broker.
 
+## Repository Layout
+
+```text
+game-engine/          Pure Java game state, board model and rules
+backend/              Spring Boot API, persistence and real-time delivery
+legacy-desktop/       Maven adapter for the original desktop application
+Nine Man's Morris/    Original desktop source and tutorial assets
+src/test/             Original desktop regression tests
+.github/workflows/    Maven CI
+Screenshots/          Desktop gameplay and tutorial images
+Design Rationale/     Original team design documents
+docker-compose.yml    Local API and PostgreSQL services
+```
+
 ## Design Documentation
 
 - [Domain model](Group43_Domain_Model.pdf)
@@ -206,4 +264,4 @@ Rendering and input handling use an adapted copy of Princeton University's `StdD
 
 ## Academic Context
 
-This repository is an archived and subsequently modernized copy of a collaborative university project. The GitHub history begins with the import and does not contain the original Monash GitLab commit history. The post-course backend refactor should be described separately from the original group work in applications and interviews.
+The original game was created by Group 43 for Monash University FIT3077 (Semester 1, 2023). This repository preserves that collaborative academic work alongside subsequent backend and shared-engine development. The GitHub history begins with the import and does not contain the original Monash GitLab commit history. The post-course backend refactor should be described separately from the original group work in applications and interviews.
