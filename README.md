@@ -2,17 +2,41 @@
 
 [![Java CI](https://github.com/hannnz1/nine-mens-morris-java/actions/workflows/ci.yml/badge.svg)](https://github.com/hannnz1/nine-mens-morris-java/actions/workflows/ci.yml)
 
-**A Java board game with a shared rules engine, desktop and browser clients, and a persistent multiplayer backend.**
+**A browser-based multiplayer board game powered by a shared Java rules engine and a Spring Boot backend.**
 
 Nine Men's Morris is a refactored, multi-module Java application that separates game rules from presentation and persistence. The desktop client and Spring Boot API share a framework-independent domain engine. The backend adds persistent multiplayer sessions, player-token authorization, optimistic concurrency control, idempotent actions and real-time updates. A browser client provides a playable board using REST actions and STOMP subscriptions, with no frontend build step or CDN dependency.
 
 **Java 17 · Spring Boot · PostgreSQL · JPA / Hibernate · Flyway · STOMP / WebSocket · Maven · Docker**
 
-[Quick start](#quick-start) · [Architecture](#architecture) · [API walkthrough](#try-the-rest-api) · [Tests](#build-and-test) · [Code guide](#code-guide)
+[Web client](#web-client) · [Play locally](#play-in-the-browser) · [Quick start](#quick-start) · [Architecture](#architecture) · [API walkthrough](#try-the-rest-api) · [Tests](#build-and-test) · [Code guide](#code-guide)
 
-![Desktop gameplay with move hints](<Screenshots/Hints prompting Black selection.png>)
+## Web Client
 
-*The screenshot shows the original desktop client. The browser client is served separately by Spring Boot at `/`; the screenshot is not a browser UI preview.*
+The current web frontend is included in this repository and served by the backend at **`http://localhost:8080/`** after local startup. It is the main browser entry point for creating and joining matches.
+
+| Screen / interaction | What the client provides |
+| --- | --- |
+| Create or join | Enter a player name, create a match as White, or join by game ID as Black |
+| Interactive board | 24 board positions, legal-action highlights, source selection, placement and removal |
+| Match panel | Player names, active side, game phase, pieces remaining to place and state version |
+| Real-time connection | STOMP updates, connection status and WebSocket reconnect |
+| Session controls | Tab-local credential storage, refresh, copy game ID and leave session |
+| Responsive layout | HTML, CSS and JavaScript packaged with Spring Boot; no separate frontend build |
+
+**Frontend source:** [HTML](backend/src/main/resources/static/index.html) · [CSS](backend/src/main/resources/static/styles.css) · [JavaScript](backend/src/main/resources/static/app.js)
+
+To open the web client locally:
+
+```powershell
+git clone https://github.com/hannnz1/nine-mens-morris-java.git
+cd nine-mens-morris-java
+Copy-Item .env.example .env
+# Configure .env for your environment before starting.
+docker compose up --build -d
+# After the API is healthy, open http://localhost:8080/ in your browser.
+```
+
+See [Play in the browser](#play-in-the-browser) for the two-player walkthrough. GitHub displays the source and this README; it does not run the Spring Boot server, PostgreSQL database or WebSocket connection. The localhost address refers to your own running instance, not a hosted public demo.
 
 ## Project Highlights
 
@@ -241,6 +265,10 @@ API integration tests use H2 in PostgreSQL compatibility mode. They do not repla
 - PostgreSQL Docker and the multiplayer demo were not run in this verification because the Docker Linux engine was unavailable. Two-window browser/STOMP behavior still requires runtime verification; Maven tests alone do not establish it.
 
 ## Run the Desktop Client
+
+The desktop application remains available alongside the web client. The image below shows the desktop UI, not the browser frontend.
+
+![Desktop gameplay with move hints](<Screenshots/Hints prompting Black selection.png>)
 
 Package and launch the executable desktop JAR:
 
