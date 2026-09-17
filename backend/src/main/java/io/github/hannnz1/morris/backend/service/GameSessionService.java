@@ -20,9 +20,10 @@ import io.github.hannnz1.morris.engine.GameEngine;
 import io.github.hannnz1.morris.engine.GameState;
 import io.github.hannnz1.morris.engine.Player;
 import org.springframework.http.HttpStatus;
-import org.springframework.messaging.simp.SimpMessagingTemplate;
+import io.github.hannnz1.morris.backend.config.GameWebSocketHandler;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
@@ -35,55 +36,59 @@ import java.util.UUID;
 @Service
 public class GameSessionService {
 
+    private static final org.slf4j.Logger LOGGER = org.slf4j.LoggerFactory.getLogger(GameSessionService.class);
+
     private final GameSessionRepository games;
     private final IdempotencyRecordRepository idempotencyRecords;
     private final TokenService tokens;
     private final ObjectMapper objectMapper;
-    private final SimpMessagingTemplate messagingTemplate;
+    private final GameWebSocketHandler gameUpdates;
 
     public GameSessionService(GameSessionRepository games,
                               IdempotencyRecordRepository idempotencyRecords,
                               TokenService tokens,
                               ObjectMapper objectMapper,
-                              SimpMessagingTemplate messagingTemplate) {
+                              GameWebSocketHandler gameUpdates) {
         this.games = games;
         this.idempotencyRecords = idempotencyRecords;
         this.tokens = tokens;
         this.objectMapper = objectMapper;
-        this.messagingTemplate = messagingTemplate;
+        this.gameUpdates = gameUpdates;
     }
 
     @Transactional
     public CreateGameResponse create(CreateGameRequest request) {
         String whiteToken = tokens.generate();
-        boolean blackPlayerProvided = request.blackPlayer() != null && !request.blackPlayer().isBlank();
-        String blackToken = blackPlayerProvided ? tokens.generate() : null;
         Instant now = Instant.now();
         GameState state = GameEngine.newGame().state();
         GameSessionEntity entity = new GameSessionEntity(
                 UUID.randomUUID(), request.whitePlayer().trim(),
-                blackPlayerProvided ? request.blackPlayer().trim() : null,
-                tokens.hash(whiteToken), blackPlayerProvided ? tokens.hash(blackToken) : "",
-                blackPlayerProvided ? statusOf(state) : "WAITING_FOR_PLAYER",
+                null,
+                tokens.hash(whiteToken), "",
+                "WAITING_FOR_PLAYER",
                 writeJson(state), now);
         entity = games.saveAndFlush(entity);
 
         return new CreateGameResponse(
                 toResponse(entity, state),
-                new PlayerCredential(Player.WHITE, entity.getWhitePlayer(), whiteToken),
-                blackPlayerProvided
-                        ? new PlayerCredential(Player.BLACK, entity.getBlackPlayer(), blackToken)
-                        : null);
+                new PlayerCredential(Player.WHITE, entity.getWhitePlayer(), whiteToken));
     }
 
-    @Transactional
+    @Transactional(isolation = Isolation.READ_COMMITTED)
     public JoinGameResponse join(UUID id, JoinGameRequest request) {
-        GameSessionEntity entity = findGame(id);
+        GameSessionEntity entity = findGameForUpdate(id);
+        String blackToken = request.joinToken();
+        if (tokens.matches(blackToken, entity.getWhiteTokenHash())) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "INVALID_JOIN_TOKEN", "Use an independent join credential");
+        }
+        if (entity.getBlackPlayer() != null && tokens.matches(blackToken, entity.getBlackTokenHash())) {
+            return new JoinGameResponse(toResponse(entity, readState(entity)),
+                    new PlayerCredential(Player.BLACK, entity.getBlackPlayer(), blackToken));
+        }
         if (entity.getBlackPlayer() != null) {
             throw new ApiException(HttpStatus.CONFLICT, "GAME_ALREADY_FULL",
                     "The game already has two players");
         }
-        String blackToken = tokens.generate();
         entity.joinBlackPlayer(request.blackPlayer().trim(), tokens.hash(blackToken), Instant.now());
         entity = games.saveAndFlush(entity);
         GameResponse response = toResponse(entity, readState(entity));
@@ -98,13 +103,25 @@ public class GameSessionService {
         return toResponse(entity, readState(entity));
     }
 
-    @Transactional
+    @Transactional(readOnly = true)
+    public GameResponse restore(UUID id, String playerToken) {
+        validatePlayerToken(playerToken);
+        GameSessionEntity entity = findGame(id);
+        authenticate(entity, playerToken);
+        return toResponse(entity, readState(entity));
+    }
+
+    @Transactional(isolation = Isolation.READ_COMMITTED)
     public GameResponse performAction(UUID id, String playerToken, String idempotencyKey,
                                       ActionRequest request) {
         validateIdempotencyKey(idempotencyKey);
         validatePlayerToken(playerToken);
         String fingerprint = tokens.hash(playerToken + ":" + writeJson(request));
 
+        GameSessionEntity entity = findGameForUpdate(id);
+        Player player = authenticate(entity, playerToken);
+        // Read after acquiring the game lock so concurrent retries see the committed result.
+        // Replay before checking the version/turn, which change after a successful action.
         var previous = idempotencyRecords.findByGameIdAndIdempotencyKey(id, idempotencyKey);
         if (previous.isPresent()) {
             if (!previous.get().getRequestFingerprint().equals(fingerprint)) {
@@ -114,20 +131,18 @@ public class GameSessionService {
             return readJson(previous.get().getResponseJson(), GameResponse.class);
         }
 
-        GameSessionEntity entity = findGame(id);
         if (entity.getBlackPlayer() == null) {
             throw new ApiException(HttpStatus.CONFLICT, "WAITING_FOR_PLAYER",
                     "A second player must join before the game can start");
         }
-        Player player = authenticate(entity, playerToken);
         GameState currentState = readState(entity);
-        if (player != currentState.currentPlayer()) {
-            throw new ApiException(HttpStatus.FORBIDDEN, "NOT_YOUR_TURN",
-                    "Only the current player can perform this action");
-        }
         if (request.expectedVersion() != entity.getVersion()) {
             throw new ApiException(HttpStatus.CONFLICT, "VERSION_CONFLICT",
                     "The supplied version is stale; reload the game before retrying");
+        }
+        if (player != currentState.currentPlayer()) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "NOT_YOUR_TURN",
+                    "Only the current player can perform this action");
         }
 
         GameState nextState = GameEngine.restore(currentState)
@@ -144,6 +159,11 @@ public class GameSessionService {
 
     private GameSessionEntity findGame(UUID id) {
         return games.findById(id).orElseThrow(() ->
+                new ApiException(HttpStatus.NOT_FOUND, "GAME_NOT_FOUND", "The game does not exist"));
+    }
+
+    private GameSessionEntity findGameForUpdate(UUID id) {
+        return games.findByIdForUpdate(id).orElseThrow(() ->
                 new ApiException(HttpStatus.NOT_FOUND, "GAME_NOT_FOUND", "The game does not exist"));
     }
 
@@ -195,7 +215,12 @@ public class GameSessionService {
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override
             public void afterCommit() {
-                messagingTemplate.convertAndSend("/topic/games/" + gameId, response);
+                try {
+                    gameUpdates.broadcast(gameId, response);
+                } catch (RuntimeException exception) {
+                    // The transaction is already committed; snapshot reads recover missed notifications.
+                    LOGGER.warn("Committed game {} version {} could not be broadcast", gameId, response.version(), exception);
+                }
             }
         });
     }

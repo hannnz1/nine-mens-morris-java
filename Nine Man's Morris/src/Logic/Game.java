@@ -37,7 +37,10 @@ public class Game {
     public final ArrayList<Position> positions;
     public final Map<Position, ArrayList<Position>> edges;
     public Position selectedPos;
-    public boolean isWhiteRound = true;
+    private final CandidateMgr candidates = new CandidateMgr();
+    private final HintManager hints = new HintManager();
+    public CandidateMgr getCandidates() { return candidates; }
+    public HintManager getHints() { return hints; }
     public final ArrayList<Line3> formedLines = new ArrayList<>();
     public String opPrompt = "";
 
@@ -127,7 +130,7 @@ public class Game {
                 selectedPos = clicked;
                 gatherCandidates();
             } else {
-                HintManager.getInstance().newTips("Can not select this token to move!");
+                hints.newTips("Can not select this token to move!");
             }
             return;
         }
@@ -151,7 +154,6 @@ public class Game {
     private void syncUi() {
         engine.state().board().forEach((position, piece) ->
                 uiByBoard.get(position).setStatus(toUiStatus(piece)));
-        isWhiteRound = isWhiteRound();
         formedLines.clear();
         for (var mill : BoardTopology.mills()) {
             Piece first = engine.state().board().get(mill.iterator().next());
@@ -175,20 +177,20 @@ public class Game {
     private void gatherCandidates() {
         GamePhase phase = engine.state().phase();
         if (phase == GamePhase.REMOVE) {
-            CandidateMgr.getInstance().setCandidates(toUiPositions(engine.removablePieces()));
+            candidates.setCandidates(toUiPositions(engine.removablePieces()));
             opPrompt = "Select one enemy token to kick off!";
         } else if (phase == GamePhase.PLACING) {
-            CandidateMgr.getInstance().setCandidates(toUiPositions(engine.legalPlacements()));
+            candidates.setCandidates(toUiPositions(engine.legalPlacements()));
             opPrompt = "Select one position to place your token!";
         } else if (phase == GamePhase.GAME_OVER) {
-            CandidateMgr.getInstance().setCandidates(java.util.Set.of());
+            candidates.setCandidates(java.util.Set.of());
             opPrompt = "Game over";
         } else if (selectedPos == null) {
-            CandidateMgr.getInstance().setCandidates(toUiPositions(engine.legalMoves().keySet()));
+            candidates.setCandidates(toUiPositions(engine.legalMoves().keySet()));
             opPrompt = "Select one token you want to move!";
         } else {
             BoardPosition source = boardByUi.get(selectedPos);
-            CandidateMgr.getInstance().setCandidates(
+            candidates.setCandidates(
                     toUiPositions(engine.legalMoves().getOrDefault(source, java.util.Set.of())));
             opPrompt = "Select where you want to move the token to!";
         }
@@ -198,22 +200,6 @@ public class Game {
         java.util.Set<Position> result = new java.util.HashSet<>();
         boardPositions.forEach(position -> result.add(uiByBoard.get(position)));
         return result;
-    }
-
-    // Compatibility helpers retained for the legacy hint classes.
-    public boolean hasAnyEmptyNeighbor(Position position) {
-        BoardPosition boardPosition = boardByUi.get(position);
-        return BoardTopology.neighboursOf(boardPosition).stream()
-                .anyMatch(point -> engine.state().board().get(point) == Piece.EMPTY);
-    }
-
-    public boolean isAMillPieceInLine3(Position position) {
-        BoardPosition boardPosition = boardByUi.get(position);
-        Piece piece = engine.state().board().get(boardPosition);
-        return piece != Piece.EMPTY && BoardTopology.mills().stream()
-                .filter(mill -> mill.contains(boardPosition))
-                .anyMatch(mill -> mill.stream()
-                        .allMatch(point -> engine.state().board().get(point) == piece));
     }
 
     public String getSide() {

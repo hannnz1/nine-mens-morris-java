@@ -37,7 +37,7 @@ public class HintView {
         /**
          The draw method is responsible for rendering the hint view. It first determines the current side based on
          whether it is white's turn or black's turn. If the prompt animation is active and the hint is not enabled,
-         it iterates over the candidate positions (obtained from CandidateMgr.getInstance().getCandidates()) and draws
+         it iterates over the candidate positions (obtained from v.getCandidates().getCandidates()) and draws
          circles around them. The color of the circles depends on the status of the positions (empty or occupied). If
          there is a selected position (v.selectedPos is not null), it also draws a circle around the selected position
          in yellow.
@@ -50,7 +50,7 @@ public class HintView {
 
 
         if (isAnimShowPrompt && !isHint) {
-            for (var start : CandidateMgr.getInstance().getCandidates()) {
+            for (var start : v.getCandidates().getCandidates()) {
                 double radius = 0.05;
                 Color c = StdDraw.GREEN;
                 boolean needDraw = false;

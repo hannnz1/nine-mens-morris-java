@@ -15,6 +15,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class GameRulesTest {
 
+    @Test
+    void differentGamesDoNotShareCandidates() {
+        game.clickedPos(positions.get(0));
+        BoardView secondBoard = new BoardView();
+        secondBoard.initBoard(0.64);
+        Game other = new Game(secondBoard.getPositions(), secondBoard.getEdges());
+        assertEquals(23, game.getCandidates().getCandidates().size());
+        assertEquals(24, other.getCandidates().getCandidates().size());
+        assertFalse(other.getCandidates().getCandidates().contains(positions.get(1)));
+    }
+
     private Game game;
     private ArrayList<Position> positions;
     private Map<Position, ArrayList<Position>> edges;
@@ -51,7 +62,7 @@ class GameRulesTest {
         assertTrue(game.isWhiteRound());
         assertEquals(9, game.getWhiteAside());
         assertEquals(9, game.getBlackAside());
-        assertEquals(24, CandidateMgr.getInstance().getCandidates().size());
+        assertEquals(24, game.getCandidates().getCandidates().size());
     }
 
     @Test
@@ -64,7 +75,7 @@ class GameRulesTest {
         assertEquals(8, game.getWhiteAside());
         assertEquals(9, game.getBlackAside());
         assertFalse(game.isWhiteRound());
-        assertEquals(23, CandidateMgr.getInstance().getCandidates().size());
+        assertEquals(23, game.getCandidates().getCandidates().size());
     }
 
     @Test
@@ -94,9 +105,9 @@ class GameRulesTest {
         game.clickedPos(whiteThree);
 
         assertTrue(game.isWhiteRound(), "White keeps the turn while choosing a piece to remove");
-        assertEquals(2, CandidateMgr.getInstance().getCandidates().size());
-        assertTrue(CandidateMgr.getInstance().getCandidates().contains(blackOne));
-        assertTrue(CandidateMgr.getInstance().getCandidates().contains(blackTwo));
+        assertEquals(2, game.getCandidates().getCandidates().size());
+        assertTrue(game.getCandidates().getCandidates().contains(blackOne));
+        assertTrue(game.getCandidates().getCandidates().contains(blackTwo));
 
         game.clickedPos(blackOne);
 
@@ -105,4 +116,3 @@ class GameRulesTest {
         assertFalse(game.isWhiteRound());
     }
 }
-

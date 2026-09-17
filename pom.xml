@@ -20,7 +20,6 @@
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.release>17</maven.compiler.release>
-        <junit.version>5.10.2</junit.version>
         <spring-boot.version>3.4.13</spring-boot.version>
     </properties>
 

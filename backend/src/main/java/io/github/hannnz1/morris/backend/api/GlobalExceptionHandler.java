@@ -5,6 +5,7 @@ import io.github.hannnz1.morris.backend.api.GameApiDtos.FieldError;
 import io.github.hannnz1.morris.engine.GameRuleException;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
@@ -76,12 +77,25 @@ public class GlobalExceptionHandler {
                 request, List.of());
     }
 
+    @ExceptionHandler(PessimisticLockingFailureException.class)
+    ResponseEntity<ApiError> handleLockBusy(PessimisticLockingFailureException exception,
+                                           HttpServletRequest request) {
+        return response(HttpStatus.SERVICE_UNAVAILABLE, "GAME_BUSY",
+                "The game is busy; retry the same request with the same Idempotency-Key", request, List.of());
+    }
+
     @ExceptionHandler(DataIntegrityViolationException.class)
     ResponseEntity<ApiError> handleConflict(DataIntegrityViolationException exception,
                                              HttpServletRequest request) {
-        return response(HttpStatus.CONFLICT, "CONCURRENT_REQUEST_CONFLICT",
-                "A concurrent request has already been processed; reload before retrying",
-                request, List.of());
+        for (Throwable cause = exception; cause != null; cause = cause.getCause()) {
+            if (cause instanceof org.hibernate.exception.ConstraintViolationException constraint
+                    && "uk_idempotency_game_key".equals(constraint.getConstraintName())
+                    && "23505".equals(constraint.getSQLState())) {
+                return response(HttpStatus.CONFLICT, "CONCURRENT_REQUEST_CONFLICT",
+                        "Retry the original request with the same Idempotency-Key", request, List.of());
+            }
+        }
+        return handleUnexpected(exception, request);
     }
 
     @ExceptionHandler(Exception.class)

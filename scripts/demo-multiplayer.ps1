@@ -51,7 +51,7 @@ function Invoke-JsonRequest {
         $jsonBody = $Body | ConvertTo-Json -Depth 10 -Compress
         $request.ContentType = "application/json"
         $request.Body = $jsonBody
-        Write-Verbose "$Method $Path body: $jsonBody"
+        Write-Verbose "$Method $Path (body omitted to protect credentials)"
     }
 
     Invoke-RestMethod @request
@@ -188,11 +188,15 @@ Write-Host "  Status: $($created.game.status)"
 Write-Host "  White credential issued (not printed)"
 
 Write-DemoStep "[3/9] Bob joins and receives the Black credential"
+$joinBytes = New-Object byte[] 32
+$joinRandom = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+try { $joinRandom.GetBytes($joinBytes) } finally { $joinRandom.Dispose() }
+$joinToken = [Convert]::ToBase64String($joinBytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
 $joined = Invoke-JsonRequest `
     -Method Post `
     -Path "/api/v1/games/$gameId/join" `
     -Headers $null `
-    -Body @{ blackPlayer = $BlackPlayer }
+    -Body @{ blackPlayer = $BlackPlayer; joinToken = $joinToken }
 
 $blackToken = [string]$joined.credential.token
 $version = [long]$joined.game.version
@@ -301,4 +305,4 @@ Write-Host "  Phase: $($final.phase)"
 Write-Host "  Current player: $($final.state.currentPlayer)"
 Write-Host "  Board: White=A1,D1,G1; Black=B4,B6; B2 was removed"
 Write-Host ""
-Write-Host "The containers remain running for inspection. Stop them with: docker compose down"
+Write-Host "The services remain running for inspection. If started with Docker, stop them with: docker compose down"

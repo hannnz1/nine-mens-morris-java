@@ -51,7 +51,7 @@ class GameApiIntegrationTest {
 
         mockMvc.perform(get("/api/v1/games/{id}", created.id()))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.version").value(0))
+                .andExpect(jsonPath("$.version").value(1))
                 .andExpect(jsonPath("$.phase").value("PLACING"))
                 .andExpect(jsonPath("$.whitePlayer").value("Alice"))
                 .andExpect(jsonPath("$.whiteCredential").doesNotExist())
@@ -73,11 +73,11 @@ class GameApiIntegrationTest {
         String whiteToken = json(createResult).at("/whiteCredential/token").asText();
 
         submit(new CreatedGame(gameId, whiteToken, ""), whiteToken, "too-early",
-                actionBody("PLACE", null, "A1", 0), 409);
+                actionBody("PLACE", null, "A1", 1), 409);
 
         mockMvc.perform(post("/api/v1/games/{id}/join", gameId)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"blackPlayer\":\"Bob\"}"))
+                        .content(joinBody("Bob", "b".repeat(43))))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.game.status").value("IN_PROGRESS"))
                 .andExpect(jsonPath("$.credential.side").value("BLACK"))
@@ -86,7 +86,7 @@ class GameApiIntegrationTest {
 
         mockMvc.perform(post("/api/v1/games/{id}/join", gameId)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"blackPlayer\":\"Mallory\"}"))
+                        .content(joinBody("Mallory", "c".repeat(43))))
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.code").value("GAME_ALREADY_FULL"));
     }
@@ -94,26 +94,26 @@ class GameApiIntegrationTest {
     @Test
     void appliesAnActionAndReturnsTheSameResponseForAnIdempotentRetry() throws Exception {
         CreatedGame created = createGame();
-        String body = actionBody("PLACE", null, "A1", 0);
+        String body = actionBody("PLACE", null, "A1", 1);
 
         MvcResult first = submit(created, created.whiteToken(), "place-white-a1", body, 200);
         MvcResult retry = submit(created, created.whiteToken(), "place-white-a1", body, 200);
 
         JsonNode firstJson = json(first);
         JsonNode retryJson = json(retry);
-        assertThat(firstJson.get("version").asLong()).isEqualTo(1);
+        assertThat(firstJson.get("version").asLong()).isEqualTo(2);
         assertThat(retryJson).isEqualTo(firstJson);
-        assertThat(games.findById(created.id()).orElseThrow().getVersion()).isEqualTo(1);
+        assertThat(games.findById(created.id()).orElseThrow().getVersion()).isEqualTo(2);
     }
 
     @Test
     void rejectsReusingAnIdempotencyKeyForADifferentAction() throws Exception {
         CreatedGame created = createGame();
         submit(created, created.whiteToken(), "same-key",
-                actionBody("PLACE", null, "A1", 0), 200);
+                actionBody("PLACE", null, "A1", 1), 200);
 
         submit(created, created.whiteToken(), "same-key",
-                actionBody("PLACE", null, "D1", 0), 409)
+                actionBody("PLACE", null, "D1", 1), 409)
                 .getResponse();
     }
 
@@ -121,10 +121,10 @@ class GameApiIntegrationTest {
     void rejectsAStaleVersionInsteadOfOverwritingNewerState() throws Exception {
         CreatedGame created = createGame();
         submit(created, created.whiteToken(), "white-1",
-                actionBody("PLACE", null, "A1", 0), 200);
+                actionBody("PLACE", null, "A1", 1), 200);
 
         MvcResult result = submit(created, created.blackToken(), "black-stale",
-                actionBody("PLACE", null, "A4", 0), 409);
+                actionBody("PLACE", null, "A4", 1), 409);
         assertThat(json(result).get("code").asText()).isEqualTo("VERSION_CONFLICT");
     }
 
@@ -132,7 +132,7 @@ class GameApiIntegrationTest {
     void rejectsAnInvalidPlayerToken() throws Exception {
         CreatedGame created = createGame();
         MvcResult result = submit(created, "not-a-valid-token", "invalid-token",
-                actionBody("PLACE", null, "A1", 0), 403);
+                actionBody("PLACE", null, "A1", 1), 403);
         assertThat(json(result).get("code").asText()).isEqualTo("INVALID_PLAYER_TOKEN");
     }
 
@@ -140,9 +140,9 @@ class GameApiIntegrationTest {
     void mapsIllegalGameActionsToAStableApiError() throws Exception {
         CreatedGame created = createGame();
         submit(created, created.whiteToken(), "white-a1",
-                actionBody("PLACE", null, "A1", 0), 200);
+                actionBody("PLACE", null, "A1", 1), 200);
         submit(created, created.blackToken(), "black-occupied",
-                actionBody("PLACE", null, "A1", 1), 422)
+                actionBody("PLACE", null, "A1", 2), 422)
                 .getResponse();
     }
 
@@ -169,20 +169,22 @@ class GameApiIntegrationTest {
                 .andExpect(jsonPath("$.code").value("MALFORMED_JSON"));
     }
 
+    private String joinBody(String name, String token) throws Exception {
+        return objectMapper.writeValueAsString(java.util.Map.of("blackPlayer", name, "joinToken", token));
+    }
+
     private CreatedGame createGame() throws Exception {
-        MvcResult result = mockMvc.perform(post("/api/v1/games")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"whitePlayer\":\" Alice \",\"blackPlayer\":\"Bob\"}"))
+        MvcResult result = mockMvc.perform(post("/api/v1/games").contentType(MediaType.APPLICATION_JSON)
+                .content("{\"whitePlayer\":\" Alice \"}"))
                 .andExpect(status().isCreated())
-                .andExpect(jsonPath("$.game.status").value("IN_PROGRESS"))
-                .andExpect(jsonPath("$.whiteCredential.token").isNotEmpty())
-                .andExpect(jsonPath("$.blackCredential.token").isNotEmpty())
-                .andReturn();
-        JsonNode response = json(result);
-        return new CreatedGame(
-                UUID.fromString(response.at("/game/id").asText()),
-                response.at("/whiteCredential/token").asText(),
-                response.at("/blackCredential/token").asText());
+                .andExpect(jsonPath("$.game.status").value("WAITING_FOR_PLAYER"))
+                .andExpect(jsonPath("$.blackCredential").doesNotExist()).andReturn();
+        JsonNode body = json(result);
+        UUID id = UUID.fromString(body.at("/game/id").asText());
+        String token = new io.github.hannnz1.morris.backend.service.TokenService().generate();
+        mockMvc.perform(post("/api/v1/games/{id}/join", id).contentType(MediaType.APPLICATION_JSON)
+                .content(joinBody("Bob", token))).andExpect(status().isOk());
+        return new CreatedGame(id, body.at("/whiteCredential/token").asText(), token);
     }
 
     private MvcResult submit(CreatedGame game, String token, String key,

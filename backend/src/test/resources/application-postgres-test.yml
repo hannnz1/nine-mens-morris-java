@@ -1,0 +1,10 @@
+# Explicitly run db/init.sql in a disposable database first; this profile only validates.
+# The concurrency suite deletes its game rows.
+spring:
+  datasource:
+    url: ${PG_TEST_URL}
+    username: ${PG_TEST_USERNAME:morris_test}
+    password: ${PG_TEST_PASSWORD:}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      connection-init-sql: "SET lock_timeout = '5s'"

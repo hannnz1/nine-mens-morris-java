@@ -13,6 +13,9 @@ spring:
     url: ${DB_URL:jdbc:postgresql://localhost:5432/morris}
     username: ${DB_USERNAME:morris}
     password: ${DB_PASSWORD:morris}
+    hikari:
+      # PostgreSQL session setting, also applied to connections created after startup.
+      connection-init-sql: "SET lock_timeout = '${DB_LOCK_TIMEOUT:2s}'"
   jpa:
     open-in-view: false
     hibernate:
@@ -21,8 +24,10 @@ spring:
       hibernate:
         jdbc:
           time_zone: UTC
-  flyway:
-    enabled: true
+  # Initialize a new database explicitly with db/init.sql before starting this app.
+  sql:
+    init:
+      mode: never
   lifecycle:
     timeout-per-shutdown-phase: 20s
 

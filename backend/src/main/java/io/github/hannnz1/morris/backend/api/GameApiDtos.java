@@ -9,6 +9,7 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.PositiveOrZero;
 import jakarta.validation.constraints.Size;
+import jakarta.validation.constraints.Pattern;
 
 import java.time.Instant;
 import java.util.List;
@@ -21,13 +22,13 @@ public final class GameApiDtos {
     }
 
     public record CreateGameRequest(
-            @NotBlank @Size(max = 50) String whitePlayer,
-            @Size(max = 50) String blackPlayer
+            @NotBlank @Size(max = 50) String whitePlayer
     ) {
     }
 
     public record JoinGameRequest(
-            @NotBlank @Size(max = 50) String blackPlayer
+            @NotBlank @Size(max = 50) String blackPlayer,
+            @NotBlank @Pattern(regexp = "[A-Za-z0-9_-]{43}") String joinToken
     ) {
     }
 
@@ -42,8 +43,7 @@ public final class GameApiDtos {
 
     public record CreateGameResponse(
             GameResponse game,
-            PlayerCredential whiteCredential,
-            PlayerCredential blackCredential
+            PlayerCredential whiteCredential
     ) {
     }
 

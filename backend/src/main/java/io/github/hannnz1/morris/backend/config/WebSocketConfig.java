@@ -1,36 +1,23 @@
 package io.github.hannnz1.morris.backend.config;
 
 import org.springframework.context.annotation.Configuration;
-import org.springframework.messaging.simp.config.MessageBrokerRegistry;
-import org.springframework.messaging.simp.config.ChannelRegistration;
-import org.springframework.web.socket.config.annotation.EnableWebSocketMessageBroker;
-import org.springframework.web.socket.config.annotation.StompEndpointRegistry;
-import org.springframework.web.socket.config.annotation.WebSocketMessageBrokerConfigurer;
+import org.springframework.web.socket.config.annotation.EnableWebSocket;
+import org.springframework.web.socket.config.annotation.WebSocketHandlerRegistry;
+import org.springframework.web.socket.config.annotation.WebSocketConfigurer;
 
 @Configuration
-@EnableWebSocketMessageBroker
-public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
+@EnableWebSocket
+public class WebSocketConfig implements WebSocketConfigurer {
 
-    private final WebSocketAuthorizationInterceptor authorizationInterceptor;
+    private final GameWebSocketHandler handler;
 
-    public WebSocketConfig(WebSocketAuthorizationInterceptor authorizationInterceptor) {
-        this.authorizationInterceptor = authorizationInterceptor;
+    public WebSocketConfig(GameWebSocketHandler handler) {
+        this.handler = handler;
     }
 
     @Override
-    public void configureClientInboundChannel(ChannelRegistration registration) {
-        registration.interceptors(authorizationInterceptor);
-    }
-
-    @Override
-    public void configureMessageBroker(MessageBrokerRegistry registry) {
-        registry.enableSimpleBroker("/topic");
-        registry.setApplicationDestinationPrefixes("/app");
-    }
-
-    @Override
-    public void registerStompEndpoints(StompEndpointRegistry registry) {
-        registry.addEndpoint("/ws")
-                .setAllowedOriginPatterns("http://localhost:*", "http://127.0.0.1:*");
+    public void registerWebSocketHandlers(WebSocketHandlerRegistry registry) {
+        // Browser assets and WebSocket are served by the same application origin.
+        registry.addHandler(handler, "/ws");
     }
 }

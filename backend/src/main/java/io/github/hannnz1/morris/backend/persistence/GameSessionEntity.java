@@ -16,6 +16,8 @@ public class GameSessionEntity {
     @Id
     private UUID id;
 
+    // Writes acquire a pessimistic row lock; retain the revision for API/WebSocket ordering
+    // and as a defensive check for any future writer that bypasses that convention.
     @Version
     private long version;
 

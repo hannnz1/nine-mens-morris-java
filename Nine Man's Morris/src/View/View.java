@@ -72,7 +72,7 @@ public class View {
         posPainter.update(time_step);
         hintView.update(time_step);
         hintButton.update(time_step);
-        HintManager.getInstance().update(time_step);
+        game.getHints().update(time_step);
         tutorView.update(time_step);
         tutorButton.update(time_step);
         mouseClickUpdate();
@@ -125,7 +125,7 @@ public class View {
         hintButton.draw();
         tutorView.draw();
         tutorButton.draw();
-        HintManager.getInstance().draw();
+        game.getHints().draw();
     }
 
     private void drawPoints() {

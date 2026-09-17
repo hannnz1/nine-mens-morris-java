@@ -1,8 +1,13 @@
+-- Final schema for a NEW, EMPTY database. This is not an upgrade script.
+-- PostgreSQL: psql ... --set=ON_ERROR_STOP=1 --single-transaction --file=init.sql
+-- Intentionally fail if tables already exist; do not hide a mismatched schema.
+-- This same file is used by PostgreSQL, Docker initialization and H2 tests.
+
 CREATE TABLE game_sessions (
     id UUID PRIMARY KEY,
     version BIGINT NOT NULL,
     white_player VARCHAR(50) NOT NULL,
-    black_player VARCHAR(50) NOT NULL,
+    black_player VARCHAR(50),
     white_token_hash VARCHAR(64) NOT NULL,
     black_token_hash VARCHAR(64) NOT NULL,
     status VARCHAR(20) NOT NULL,
@@ -11,8 +16,6 @@ CREATE TABLE game_sessions (
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL
 );
 
-CREATE INDEX idx_game_sessions_status_updated
-    ON game_sessions (status, updated_at);
 
 CREATE TABLE idempotency_records (
     id UUID PRIMARY KEY,
@@ -23,7 +26,4 @@ CREATE TABLE idempotency_records (
     created_at TIMESTAMP WITH TIME ZONE NOT NULL,
     CONSTRAINT uk_idempotency_game_key UNIQUE (game_id, idempotency_key)
 );
-
-CREATE INDEX idx_idempotency_records_created_at
-    ON idempotency_records (created_at);
 

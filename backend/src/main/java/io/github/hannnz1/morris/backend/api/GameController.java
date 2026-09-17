@@ -41,6 +41,12 @@ public class GameController {
         return gameSessions.get(id);
     }
 
+    @GetMapping("/{id}/session")
+    public GameResponse restore(@PathVariable("id") UUID id,
+                                @RequestHeader("X-Player-Token") String playerToken) {
+        return gameSessions.restore(id, playerToken);
+    }
+
     @PostMapping("/{id}/join")
     public JoinGameResponse join(@PathVariable("id") UUID id,
                                  @Valid @RequestBody JoinGameRequest request) {

@@ -49,11 +49,19 @@ const client = {
     session: null,
     game: null,
     socket: null,
-    stompBuffer: "",
+    subscribed: false,
+    realtimeRun: null,
     reconnectTimer: null,
-    shouldReconnect: false,
+    connectionTimer: null,
+    epoch: 0,
+    entryBusy: false,
+    retryBusy: false,
+    active: false,
+    pollTimer: null,
+    pendingJoin: null,
     selectedSource: null,
     pendingAction: false,
+    lastChanged: [],
     logs: []
 };
 
@@ -69,7 +77,7 @@ function initializeBoard() {
         point.className = "position";
         point.dataset.position = position;
         point.dataset.piece = "EMPTY";
-        point.setAttribute("aria-label", `${position}, empty`);
+        point.setAttribute("aria-label", `${position}，空位`);
         point.style.setProperty("--x", `${COORDINATES[position][0]}%`);
         point.style.setProperty("--y", `${COORDINATES[position][1]}%`);
         point.addEventListener("click", () => handlePositionClick(position));
@@ -82,6 +90,9 @@ function bindEvents() {
     elements.joinForm.addEventListener("submit", joinGame);
     elements.copyGameId.addEventListener("click", copyGameId);
     elements.leaveGame.addEventListener("click", leaveGame);
+    document.getElementById("recoverSession").addEventListener("click", restoreSession);
+    document.getElementById("clearSession").addEventListener("click", clearSession);
+    document.getElementById("retryAction").addEventListener("click", retryAction);
     elements.refreshGame.addEventListener("click", () => refreshGame("手动刷新"));
 }
 
@@ -90,91 +101,140 @@ function prefillSharedGame() {
     if (sharedId) elements.joinGameId.value = sharedId;
 }
 
-async function restoreSession() {
-    let saved;
+function loadSaved() {
     try {
-        saved = JSON.parse(sessionStorage.getItem(STORAGE_KEY));
-    } catch {
-        sessionStorage.removeItem(STORAGE_KEY);
-    }
+        const value = JSON.parse(sessionStorage.getItem(STORAGE_KEY));
+        return value?.gameId ? { session: value } : (value || {});
+    } catch { return {}; }
+}
 
-    if (!saved?.gameId || !saved?.token || !saved?.side) {
+function context() { return { epoch: client.epoch, gameId: client.session?.gameId }; }
+function matches(ctx) { return ctx.epoch === client.epoch && ctx.gameId === client.session?.gameId; }
+function transient(error) { return !error.status || error.status >= 500 || error.status === 408 || error.status === 429; }
+function entryBusy(busy) {
+    client.entryBusy = busy;
+    setFormBusy(elements.createForm, busy);
+    setFormBusy(elements.joinForm, busy);
+    document.getElementById("recoverSession").disabled = busy;
+    document.getElementById("clearSession").disabled = busy;
+}
+
+async function restoreSession() {
+    if (client.entryBusy) return;
+    const saved = loadSaved();
+    client.session = saved.session || null;
+    client.pendingJoin = saved.pendingJoin || null;
+    client.pendingAction = saved.pendingAction || null;
+    client.epoch++;
+    client.game = null;
+    if (client.pendingJoin) return resumeJoin();
+    if (!client.session?.gameId || !client.session?.token || !client.session?.side) {
         showSetup();
-        setConnection("offline", "未加入对局");
         return;
     }
-
-    client.session = saved;
+    const ctx = context();
+    entryBusy(true);
     try {
-        const game = await api(`/api/v1/games/${saved.gameId}`);
-        enterGame(game, "已恢复当前标签页的玩家会话");
+        const game = await api(`/api/v1/games/${ctx.gameId}/session`, {
+            headers: { "X-Player-Token": client.session.token }
+        });
+        if (!matches(ctx)) return;
+        enterGame(game, "已恢复当前标签页的玩家身份");
     } catch (error) {
-        sessionStorage.removeItem(STORAGE_KEY);
-        client.session = null;
+        if (!matches(ctx)) return;
         showSetup();
-        showToast(readableError(error));
+        const text = error.code === "GAME_NOT_FOUND" ? "对局不存在，请确认服务连接或明确清除身份。"
+            : error.code === "INVALID_PLAYER_TOKEN" ? "玩家凭证已失效，可明确清除身份后重新加入。"
+            : "暂时无法恢复，身份已保留，请点击恢复重试。";
+        showToast(text);
+    } finally { if (matches(ctx)) entryBusy(false); }
+}
+
+function mayStartEntry() {
+    if (client.entryBusy) return false;
+    const saved = loadSaved();
+    if (saved.session || saved.pendingJoin) {
+        showToast("本标签页已有身份，请先恢复；需要更换对局时，请明确清除保存的身份。");
+        return false;
     }
+    client.epoch++;
+    client.game = null;
+    return true;
 }
 
 async function createGame(event) {
     event.preventDefault();
-    const form = event.currentTarget;
-    const playerName = form.elements.whitePlayer.value.trim();
+    if (!mayStartEntry()) return;
+    const playerName = event.currentTarget.elements.whitePlayer.value.trim();
     if (!playerName) return;
-
-    setFormBusy(form, true);
+    const ctx = context();
+    entryBusy(true);
     try {
-        const response = await api("/api/v1/games", {
-            method: "POST",
-            body: { whitePlayer: playerName }
-        });
-        client.session = {
-            gameId: response.game.id,
-            token: response.whiteCredential.token,
-            side: "WHITE",
-            playerName: response.whiteCredential.playerName
-        };
+        const response = await api("/api/v1/games", { method: "POST", body: { whitePlayer: playerName } });
+        if (!matches(ctx)) return;
+        client.session = { gameId: response.game.id, token: response.whiteCredential.token,
+            side: "WHITE", playerName: response.whiteCredential.playerName };
         saveSession();
-        setSharedGameInUrl(response.game.id);
-        enterGame(response.game, "白方已创建对局，等待黑方加入");
-        showToast("对局已创建。复制编号并在另一个浏览器窗口中加入。");
-    } catch (error) {
-        showToast(readableError(error));
-    } finally {
-        setFormBusy(form, false);
-    }
+        enterGame(response.game, "白方已创建对局，复制邀请链接邀请黑方加入");
+    } catch (error) { if (ctx.epoch === client.epoch) showToast(readableError(error)); }
+    finally { if (ctx.epoch === client.epoch) entryBusy(false); }
 }
 
 async function joinGame(event) {
     event.preventDefault();
+    if (!mayStartEntry()) return;
     const form = event.currentTarget;
-    const playerName = form.elements.blackPlayer.value.trim();
-    const gameId = form.elements.gameId.value.trim();
-    if (!playerName || !gameId) return;
-
-    setFormBusy(form, true);
-    try {
-        const response = await api(`/api/v1/games/${encodeURIComponent(gameId)}/join`, {
-            method: "POST",
-            body: { blackPlayer: playerName }
-        });
-        client.session = {
-            gameId: response.game.id,
-            token: response.credential.token,
-            side: "BLACK",
-            playerName: response.credential.playerName
-        };
-        saveSession();
-        setSharedGameInUrl(response.game.id);
-        enterGame(response.game, "黑方已加入，对局正式开始");
-    } catch (error) {
-        showToast(readableError(error));
-    } finally {
-        setFormBusy(form, false);
+    const blackPlayer = form.elements.blackPlayer.value.trim();
+    const gameId = form.elements.gameId.value.trim().toLowerCase();
+    if (!blackPlayer || !/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(gameId)) {
+        showToast("请输入玩家名称和有效的对局编号"); return;
     }
+    try {
+        client.pendingJoin = { gameId, blackPlayer, joinToken: randomToken() };
+        saveSession(); // Persist the proof BEFORE sending a request that may claim the seat.
+    } catch { client.pendingJoin = null; showToast("无法保存加入凭证，请检查浏览器存储权限。"); return; }
+    await resumeJoin();
+}
+
+async function resumeJoin() {
+    const pending = client.pendingJoin;
+    const ctx = context();
+    entryBusy(true);
+    try {
+        const response = await api(`/api/v1/games/${pending.gameId}/join`, {
+            method: "POST", body: { blackPlayer: pending.blackPlayer, joinToken: pending.joinToken }
+        });
+        if (!matches(ctx)) return;
+        client.session = { gameId: response.game.id, token: pending.joinToken,
+            side: "BLACK", playerName: response.credential.playerName };
+        client.pendingJoin = null;
+        saveSession();
+        enterGame(response.game, "黑方席位已确认，已恢复最新状态");
+    } catch (error) {
+        if (!matches(ctx)) return;
+        showSetup();
+        showToast(transient(error) ? "加入结果暂未确认，凭证已保存。点击恢复可安全重试。" : readableError(error));
+    } finally { if (ctx.epoch === client.epoch) entryBusy(false); }
+}
+
+function clearSession() {
+    if (client.entryBusy) return;
+    if (!window.confirm("永久清除本标签页的玩家凭证和未确认请求？之后无法仅凭姓名恢复身份。")) return;
+    leaveGame();
+    sessionStorage.removeItem(STORAGE_KEY);
+    client.session = null;
+    client.pendingJoin = null;
+    client.pendingAction = null;
+    showSetup();
+    setConnection("offline", "尚未进入对局");
+    showToast("保存的身份已明确清除");
 }
 
 function enterGame(game, message) {
+    client.active = true;
+    document.getElementById("inviteLink").hidden = true;
+    document.getElementById("inviteLink").value = "";
+    setSharedGameInUrl(game.id);
     elements.setupPanel.hidden = true;
     elements.gamePanel.hidden = false;
     elements.gamePanel.classList.remove("is-preview");
@@ -187,31 +247,41 @@ function enterGame(game, message) {
 }
 
 function showSetup() {
+    const saved = loadSaved();
+    document.getElementById("recoveryCard").hidden = !(saved.session || saved.pendingJoin);
     elements.setupPanel.hidden = false;
     elements.gamePanel.hidden = true;
 }
 
 function leaveGame() {
-    disconnectRealtime(false);
-    sessionStorage.removeItem(STORAGE_KEY);
-    client.session = null;
+    client.epoch++;
+    client.active = false;
+    client.retryBusy = false;
+    disconnectRealtime();
     client.game = null;
     client.selectedSource = null;
     client.logs = [];
+    client.lastChanged = [];
     history.replaceState({}, "", window.location.pathname);
     showSetup();
-    setConnection("offline", "未加入对局");
-    showToast("已离开当前标签页的对局会话");
+    setConnection("offline", "身份已保存，可恢复对局");
 }
 
 async function refreshGame(reason = "状态刷新") {
-    if (!client.session) return;
+    if (!client.session || !client.active) return;
+    const ctx = context();
     try {
-        const game = await api(`/api/v1/games/${client.session.gameId}`);
+        const game = await api(`/api/v1/games/${ctx.gameId}/session`, {
+            headers: { "X-Player-Token": client.session.token }
+        });
+        if (!matches(ctx) || !client.active) return;
         applyGame(game, "REST");
-        addLog(`${reason} · 版本 ${game.version}`);
+        setConnection(client.subscribed ? "live" : "snapshot", client.subscribed ? "实时已连接 · 已同步" : "快照已同步 · 实时未连接");
+        if (reason) addLog(`${reason} · 版本 ${game.version}`);
     } catch (error) {
-        showToast(readableError(error));
+        if (!matches(ctx) || !client.active) return;
+        setConnection("offline", "同步暂不可用，身份已保留");
+        if (reason) showToast(readableError(error));
     }
 }
 
@@ -243,7 +313,7 @@ async function handlePositionClick(position) {
         if (legalMoves[position]) {
             client.selectedSource = position;
             addLog(`已选择 ${position}，请选择目标位置`);
-            renderBoard();
+            renderGame();
         }
         return;
     }
@@ -254,44 +324,72 @@ async function handlePositionClick(position) {
     } else if (legalMoves[position]) {
         client.selectedSource = position;
         addLog(`已改选 ${position}`);
-        renderBoard();
+        renderGame();
     } else {
         showToast("该位置不是当前棋子的合法目标");
     }
 }
 
 async function performAction(type, from, to) {
-    const expectedVersion = client.game.version;
-    client.pendingAction = true;
-    renderBoard();
+    if (client.pendingAction || !client.active || !client.game) return;
+    client.pendingAction = { gameId: client.session.gameId, key: createIdempotencyKey(),
+        body: { type, from, to, expectedVersion: client.game.version } };
+    try { saveSession(); }
+    catch { client.pendingAction = null; showToast("无法保存请求，操作未发送。"); return; }
+    await retryAction();
+}
 
+async function retryAction() {
+    const pending = client.pendingAction;
+    if (!pending || client.retryBusy || !client.active || pending.gameId !== client.session?.gameId) return;
+    const ctx = context();
+    const token = client.session.token;
+    client.retryBusy = true;
+    renderGame();
     try {
-        const game = await api(`/api/v1/games/${client.session.gameId}/actions`, {
-            method: "POST",
-            headers: {
-                "X-Player-Token": client.session.token,
-                "Idempotency-Key": createIdempotencyKey()
-            },
-            body: { type, from, to, expectedVersion }
-        });
-        client.selectedSource = null;
-        applyGame(game, "REST");
-        const actionText = type === "MOVE" ? `${from} → ${to}` : `${type} ${to}`;
-        addLog(`${client.session.side} ${actionText} · 已提交`);
-    } catch (error) {
-        if (error.code === "VERSION_CONFLICT") await refreshGame("检测到版本冲突，已同步最新状态");
-        showToast(readableError(error));
+        for (let attempt = 0; attempt < 3; attempt++) {
+            if (!matches(ctx) || !client.active) return;
+            try {
+                const game = await api(`/api/v1/games/${pending.gameId}/actions`, {
+                    method: "POST", headers: { "X-Player-Token": token, "Idempotency-Key": pending.key }, body: pending.body
+                });
+                if (!matches(ctx)) return;
+                client.pendingAction = null;
+                saveSession();
+                client.selectedSource = null;
+                applyGame(game, "REST");
+                return;
+            } catch (error) {
+                if (!matches(ctx)) return;
+                const uncertain = transient(error) || error.code === "CONCURRENT_REQUEST_CONFLICT";
+                if (!uncertain) {
+                    client.pendingAction = null;
+                    saveSession();
+                    if (error.code === "VERSION_CONFLICT") await refreshGame("操作版本过期，已同步");
+                    showToast(readableError(error));
+                    return;
+                }
+                if (attempt === 2) { showToast("结果尚未确认，已保留原请求。请稍后点击重试未确认操作。"); return; }
+                await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
+            }
+        }
     } finally {
-        client.pendingAction = false;
-        renderBoard();
+        if (matches(ctx)) { client.retryBusy = false; renderGame(); }
     }
 }
 
 function applyGame(game, source) {
+    if (!client.active || game?.id !== client.session?.gameId) return;
     const previousVersion = client.game?.version;
     if (previousVersion != null && game.version < previousVersion) return;
+    if (previousVersion != null && game.version > previousVersion) {
+        const changes = POSITIONS.filter(p => (client.game.state.board[p] || "EMPTY") !== (game.state.board[p] || "EMPTY"));
+        // A skipped version may contain several moves; do not imply one latest move.
+        client.lastChanged = game.version === previousVersion + 1 ? changes : [];
+        client.selectedSource = null;
+    } else if (previousVersion == null) client.lastChanged = [];
     client.game = game;
-    if (source === "STOMP" && game.version > (previousVersion ?? -1)) {
+    if (source === "WEBSOCKET" && game.version > (previousVersion ?? -1)) {
         addLog(`收到服务端实时推送 · 版本 ${game.version}`);
     }
     renderGame();
@@ -301,15 +399,27 @@ function renderGame() {
     if (!client.game || !client.session) return;
     const game = client.game;
     const state = game.state;
-    elements.playerSide.textContent = `${client.session.side} · ${client.session.playerName}`;
+    document.getElementById("retryAction").hidden = !client.pendingAction;
+    document.getElementById("retryAction").disabled = client.retryBusy;
+    elements.playerSide.textContent = `${sideLabel(client.session.side)} · ${client.session.playerName}`;
     elements.gameVersion.textContent = String(game.version);
     elements.gamePhase.textContent = phaseLabel(game.phase);
-    elements.currentPlayer.textContent = state.winner ? `${state.winner} 获胜` : state.currentPlayer;
+    elements.currentPlayer.textContent = state.winner ? `${sideLabel(state.winner)} 获胜` : sideLabel(state.currentPlayer);
     elements.gameIdText.textContent = game.id;
     elements.whitePlayerName.textContent = game.whitePlayer;
     elements.blackPlayerName.textContent = game.blackPlayer || "等待加入";
     elements.whitePieces.textContent = String(state.whitePiecesToPlace);
     elements.blackPieces.textContent = String(state.blackPiecesToPlace);
+    for (const side of ["WHITE", "BLACK"]) {
+        const prefix = side.toLowerCase();
+        document.getElementById(prefix + "OnBoard").textContent = String(Object.values(state.board).filter(piece => piece === side).length);
+        const isTurn = !state.winner && game.status !== "WAITING_FOR_PLAYER" && state.currentPlayer === side;
+        document.getElementById(prefix + "Card").classList.toggle("is-turn", isTurn);
+        document.getElementById(prefix + "Role").textContent = sideLabel(side) + (client.session.side === side ? " · 你" : "") + (isTurn ? " · 当前回合" : "");
+    }
+    const notice = document.getElementById("operationNotice");
+    notice.hidden = !client.pendingAction;
+    notice.textContent = client.retryBusy ? "正在确认操作，请稍候…" : "上次操作结果尚未确认。请重试原请求，确认前不能继续落子。";
     elements.actionPrompt.textContent = actionPrompt();
     renderBoard();
 }
@@ -336,127 +446,125 @@ function renderBoard() {
         button.dataset.piece = piece;
         button.classList.toggle("is-legal", legal.has(position));
         button.classList.toggle("is-selected", client.selectedSource === position);
+        button.classList.toggle("is-target", legal.has(position) && piece === "EMPTY");
+        button.classList.toggle("is-source", legal.has(position) && piece !== "EMPTY");
+        button.classList.toggle("is-last-change", client.lastChanged.includes(position));
         button.disabled = !legal.has(position);
-        button.setAttribute("aria-label", `${position}, ${piece.toLowerCase()}${legal.has(position) ? ", legal action" : ""}`);
+        button.setAttribute("aria-label", `${position}，${piece === "EMPTY" ? "空位" : sideLabel(piece)}${legal.has(position) ? "，可操作" : ""}`);
     }
 }
 
 function actionPrompt() {
     const game = client.game;
     if (!game) return "创建或加入对局后即可操作";
-    if (game.status === "WAITING_FOR_PLAYER") return "等待 Black 加入；对局编号可在左侧复制";
-    if (game.state.winner) return `${game.state.winner} 获胜，对局结束`;
-    if (game.state.currentPlayer !== client.session.side) return `等待 ${game.state.currentPlayer} 操作，棋盘将实时更新`;
-    if (client.pendingAction) return "正在提交并等待事务确认…";
+    if (client.pendingAction) return client.retryBusy ? "正在确认你的操作…" : "操作结果未确认，请点击重试";
+    if (game.status === "WAITING_FOR_PLAYER") return "等待黑方加入，复制邀请链接发给朋友";
+    if (game.state.winner) return `${sideLabel(game.state.winner)}获胜，对局结束`;
+    if (game.state.currentPlayer !== client.session.side) return `等待${sideLabel(game.state.currentPlayer)}操作，棋盘会自动同步`;
+    if (client.pendingAction) return "有未确认操作，请等待或点击重试";
     if (game.phase === "PLACING") return "轮到你了：选择一个高亮棋位放置棋子";
     if (game.phase === "REMOVE") return "已形成磨：选择一个高亮的对方棋子移除";
     if (client.selectedSource) return `已选择 ${client.selectedSource}：请选择高亮目标位置`;
     return game.phase === "FLYING" ? "飞行阶段：选择棋子后可移动到任意空位" : "选择一个高亮棋子进行移动";
 }
 
+function sideLabel(side) { return side === "WHITE" ? "白方" : "黑方"; }
+
 function phaseLabel(phase) {
     return ({ PLACING: "放置阶段", MOVING: "移动阶段", FLYING: "飞行阶段", REMOVE: "移除棋子", GAME_OVER: "对局结束" })[phase] || phase;
 }
 
 function connectRealtime() {
-    disconnectRealtime(false);
-    if (!client.session) return;
-    client.shouldReconnect = true;
-    client.stompBuffer = "";
-    setConnection("connecting", "正在连接实时频道");
+    disconnectRealtime();
+    if (!client.session || !client.active) return;
+    const ctx = context();
+    const run = {};
+    client.realtimeRun = run;
+    const current = () => matches(ctx) && client.active && client.realtimeRun === run;
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const socket = new WebSocket(`${protocol}//${window.location.host}/ws`);
-    client.socket = socket;
+    let retryAllowed = true;
 
-    socket.addEventListener("open", () => {
-        if (client.socket !== socket) return;
-        sendStomp("CONNECT", { "accept-version": "1.2", "heart-beat": "0,0", host: window.location.host });
-    });
-    socket.addEventListener("message", event => {
-        if (client.socket === socket) receiveStomp(String(event.data));
-    });
-    socket.addEventListener("close", () => {
-        if (client.socket !== socket) return;
-        client.socket = null;
-        setConnection("offline", "实时连接已断开");
-        if (client.shouldReconnect && client.session) {
-            clearTimeout(client.reconnectTimer);
-            client.reconnectTimer = setTimeout(connectRealtime, 2200);
-        }
-    });
-    socket.addEventListener("error", () => {
-        if (client.socket === socket) setConnection("offline", "实时连接异常");
-    });
-}
+    const scheduleReconnect = () => {
+        if (!current() || !retryAllowed) return;
+        clearTimeout(client.reconnectTimer);
+        client.reconnectTimer = setTimeout(openSocket, 2200);
+    };
+    const openSocket = () => {
+        if (!current()) return;
+        client.subscribed = false;
+        setConnection("connecting", "正在连接实时频道");
+        let socket;
+        try { socket = new WebSocket(`${protocol}//${window.location.host}/ws`); }
+        catch { scheduleReconnect(); return; }
+        client.socket = socket;
+        let rejectionCode = null;
+        const sameSocket = () => current() && client.socket === socket;
+        client.connectionTimer = setTimeout(() => {
+            if (sameSocket() && !client.subscribed) socket.close();
+        }, 8000);
 
-function receiveStomp(payload) {
-    client.stompBuffer += payload;
-    let end = client.stompBuffer.indexOf("\0");
-    while (end >= 0) {
-        const rawFrame = client.stompBuffer.slice(0, end).replace(/^\n+/, "");
-        client.stompBuffer = client.stompBuffer.slice(end + 1);
-        if (rawFrame.trim()) handleStompFrame(parseStomp(rawFrame));
-        end = client.stompBuffer.indexOf("\0");
-    }
-    client.stompBuffer = client.stompBuffer.replace(/^\n+/, "");
-}
-
-function parseStomp(rawFrame) {
-    const normalized = rawFrame.replace(/\r\n/g, "\n");
-    const separator = normalized.indexOf("\n\n");
-    const headerText = separator >= 0 ? normalized.slice(0, separator) : normalized;
-    const body = separator >= 0 ? normalized.slice(separator + 2) : "";
-    const lines = headerText.split("\n");
-    const command = lines.shift();
-    const headers = {};
-    for (const line of lines) {
-        const colon = line.indexOf(":");
-        if (colon > 0) headers[line.slice(0, colon)] = unescapeStomp(line.slice(colon + 1));
-    }
-    return { command, headers, body };
-}
-
-function handleStompFrame(frame) {
-    if (frame.command === "CONNECTED") {
-        sendStomp("SUBSCRIBE", {
-            id: `game-${client.session.gameId}`,
-            destination: `/topic/games/${client.session.gameId}`,
-            ack: "auto",
-            "X-Player-Token": client.session.token
+        socket.addEventListener("open", () => {
+            if (!sameSocket()) return;
+            setConnection("connecting", "连接已建立，正在验证玩家身份");
+            socket.send(JSON.stringify({ type: "SUBSCRIBE", gameId: ctx.gameId, token: client.session.token }));
         });
-        setConnection("live", "实时同步已连接");
-        addLog("STOMP订阅已鉴权并建立");
-    } else if (frame.command === "MESSAGE") {
-        try { applyGame(JSON.parse(frame.body), "STOMP"); }
-        catch { showToast("收到无法解析的实时状态"); }
-    } else if (frame.command === "ERROR") {
-        setConnection("offline", "订阅鉴权失败");
-        showToast(frame.body || frame.headers.message || "STOMP订阅失败");
-    }
+        socket.addEventListener("message", event => {
+            if (!sameSocket()) return;
+            let message;
+            try { message = JSON.parse(event.data); }
+            catch { socket.close(); return; }
+            if (message?.type === "SUBSCRIBED" && message.gameId === ctx.gameId) {
+                client.subscribed = true;
+                clearTimeout(client.connectionTimer);
+                // Server registers the connection before confirming. Read after confirmation
+                // to cover earlier commits, and keep polling to recover later missed pushes.
+                void refreshGame("");
+            } else if (message?.type === "GAME_STATE" && client.subscribed) {
+                if (message.game?.id === ctx.gameId && Number.isSafeInteger(message.game.version)) {
+                    applyGame(message.game, "WEBSOCKET");
+                }
+            } else if (message?.type === "ERROR") {
+                rejectionCode = message.code;
+                retryAllowed = message.code === "INTERNAL_ERROR" || message.code === "AUTH_TIMEOUT";
+                client.subscribed = false;
+                setConnection("offline", "实时订阅失败，使用快照同步");
+                showToast(retryAllowed ? "实时连接暂不可用，将重试" : "实时订阅被拒绝，请检查并恢复玩家身份");
+                socket.close();
+            }
+        });
+        socket.addEventListener("close", event => {
+            if (!sameSocket()) return;
+            clearTimeout(client.connectionTimer);
+            client.subscribed = false;
+            if (event.code === 1008 && rejectionCode !== "AUTH_TIMEOUT") retryAllowed = false;
+            setConnection("offline", retryAllowed ? "实时连接断开，快照同步继续" : "实时订阅被拒绝，快照同步继续");
+            scheduleReconnect();
+        });
+        socket.addEventListener("error", () => {
+            if (sameSocket()) socket.close();
+        });
+    };
+
+    openSocket();
+    // This fallback remains active even while reconnecting or after subscription rejection.
+    // Recursive timeouts avoid overlapping periodic reads and reject old connection runs.
+    const poll = async () => {
+        if (!current()) return;
+        await refreshGame("");
+        if (current()) client.pollTimer = setTimeout(poll, 2000);
+    };
+    client.pollTimer = setTimeout(poll, 2000);
 }
 
-function sendStomp(command, headers, body = "") {
-    if (!client.socket || client.socket.readyState !== WebSocket.OPEN) return;
-    const headerLines = Object.entries(headers).map(([name, value]) => `${name}:${escapeStomp(String(value))}`).join("\n");
-    client.socket.send(`${command}\n${headerLines}\n\n${body}\0`);
-}
-
-function disconnectRealtime(sendDisconnect) {
-    client.shouldReconnect = false;
+function disconnectRealtime() {
+    client.realtimeRun = null;
+    client.subscribed = false;
+    clearTimeout(client.pollTimer);
     clearTimeout(client.reconnectTimer);
+    clearTimeout(client.connectionTimer);
     const socket = client.socket;
     client.socket = null;
-    if (!socket) return;
-    if (sendDisconnect && socket.readyState === WebSocket.OPEN) socket.send(`DISCONNECT\nreceipt:bye-${Date.now()}\n\n\0`);
-    socket.close();
-}
-
-function escapeStomp(value) {
-    return value.replace(/\\/g, "\\\\").replace(/\r/g, "\\r").replace(/\n/g, "\\n").replace(/:/g, "\\c");
-}
-
-function unescapeStomp(value) {
-    return value.replace(/\\c/g, ":").replace(/\\n/g, "\n").replace(/\\r/g, "\r").replace(/\\\\/g, "\\");
+    if (socket) socket.close();
 }
 
 async function api(path, options = {}) {
@@ -466,20 +574,25 @@ async function api(path, options = {}) {
         headers["Content-Type"] = "application/json";
         request.body = JSON.stringify(options.body);
     }
-    const response = await fetch(path, request);
-    const text = await response.text();
-    let body = null;
-    if (text) {
-        try { body = JSON.parse(text); } catch { body = { message: text }; }
-    }
-    if (!response.ok) {
-        const error = new Error(body?.message || `HTTP ${response.status}`);
-        error.status = response.status;
-        error.code = body?.code;
-        error.details = body;
-        throw error;
-    }
-    return body;
+    const controller = new AbortController();
+    request.signal = controller.signal;
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    try {
+        const response = await fetch(path, request);
+        const text = await response.text();
+        let body = null;
+        if (text) {
+            try { body = JSON.parse(text); } catch { body = { message: text }; }
+        }
+        if (!response.ok) {
+            const error = new Error(body?.message || `HTTP ${response.status}`);
+            error.status = response.status;
+            error.code = body?.code;
+            error.details = body;
+            throw error;
+        }
+        return body;
+    } finally { clearTimeout(timeout); }
 }
 
 function addLog(message) {
@@ -500,6 +613,9 @@ function addLog(message) {
 function setConnection(state, text) {
     elements.connectionPill.dataset.state = state;
     elements.connectionText.textContent = text;
+    const badge = document.getElementById("realtimeBadge");
+    badge.dataset.state = state;
+    badge.textContent = state === "live" ? "实时连接" : state === "connecting" ? "连接中" : state === "snapshot" ? "快照同步" : "未连接";
 }
 
 function setFormBusy(form, busy) {
@@ -507,7 +623,10 @@ function setFormBusy(form, busy) {
     form.setAttribute("aria-busy", String(busy));
 }
 
-function saveSession() { sessionStorage.setItem(STORAGE_KEY, JSON.stringify(client.session)); }
+function saveSession() {
+    sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ session: client.session,
+        pendingJoin: client.pendingJoin, pendingAction: client.pendingAction }));
+}
 
 function setSharedGameInUrl(gameId) {
     const url = new URL(window.location.href);
@@ -517,20 +636,30 @@ function setSharedGameInUrl(gameId) {
 
 async function copyGameId() {
     if (!client.session) return;
+    const ctx = context();
+    const url = new URL(window.location.pathname, window.location.href);
+    url.searchParams.set("game", ctx.gameId);
+    const field = document.getElementById("inviteLink");
+    field.value = url.href;
+    field.hidden = false;
     try {
-        await navigator.clipboard.writeText(client.session.gameId);
-        showToast("对局编号已复制，可在另一浏览器窗口中加入");
+        await navigator.clipboard.writeText(url.href);
+        if (matches(ctx) && client.active) showToast("邀请链接已复制，发给朋友即可加入");
     } catch {
-        showToast(`请手动复制：${client.session.gameId}`);
+        if (matches(ctx) && client.active) { field.focus(); field.select(); showToast("请复制已选中的邀请链接"); }
     }
 }
 
-function createIdempotencyKey() {
-    if (window.crypto?.randomUUID) return window.crypto.randomUUID();
-    return `web-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+function randomToken() {
+    const bytes = new Uint8Array(32);
+    window.crypto.getRandomValues(bytes);
+    return btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
+function createIdempotencyKey() { return randomToken(); }
+
 function readableError(error) {
+    if (error?.code === "GAME_BUSY") return "该对局正在处理其他请求，请稍后重试";
     return error?.code ? `${error.code}: ${error.message}` : error?.message || "请求失败，请确认后端正在运行";
 }
 
@@ -542,4 +671,4 @@ function showToast(message) {
     toastTimer = setTimeout(() => elements.toast.classList.remove("is-visible"), 4200);
 }
 
-window.addEventListener("beforeunload", () => disconnectRealtime(true));
+window.addEventListener("beforeunload", disconnectRealtime);

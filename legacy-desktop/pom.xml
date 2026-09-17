@@ -14,10 +14,6 @@
     <artifactId>legacy-desktop</artifactId>
     <name>Nine Men's Morris - Legacy Desktop</name>
 
-    <properties>
-        <maven.compiler.release>15</maven.compiler.release>
-    </properties>
-
     <build>
         <sourceDirectory>${project.basedir}/../Nine Man's Morris/src</sourceDirectory>
         <testSourceDirectory>${project.basedir}/../src/test/java</testSourceDirectory>
@@ -73,7 +69,6 @@
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
-            <version>${junit.version}</version>
             <scope>test</scope>
         </dependency>
     </dependencies>

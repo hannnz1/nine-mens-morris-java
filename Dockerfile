@@ -10,7 +10,7 @@ COPY backend/src backend/src
 
 RUN mvn --batch-mode --no-transfer-progress -pl backend -am package -DskipTests
 
-FROM eclipse-temurin:21-jre
+FROM eclipse-temurin:17-jre
 WORKDIR /app
 
 RUN groupadd --system morris && useradd --system --gid morris --home-dir /app morris

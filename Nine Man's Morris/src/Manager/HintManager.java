@@ -9,18 +9,6 @@ public class HintManager {
     // ArrayList to store the hints
     ArrayList<Hint> hints = new ArrayList<>();
 
-    // Instance of the class
-    private static HintManager tm = null;
-
-    // Singleton Design Pattern: Get the instance of HintManager
-    public static HintManager getInstance() {
-        if (tm == null) {
-            tm = new HintManager();
-        }
-
-        return tm;
-    }
-
     // Add a new hint to the list
     public void newTips(String str) {
         hints.add(new Hint(str));

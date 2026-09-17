@@ -13,6 +13,24 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: morris_concurrency_test
+          POSTGRES_USER: morris_test
+          POSTGRES_PASSWORD: ci-only-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U morris_test -d morris_concurrency_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PG_TEST_URL: jdbc:postgresql://localhost:5432/morris_concurrency_test
+      PG_TEST_USERNAME: morris_test
+      PG_TEST_PASSWORD: ci-only-password
 
     steps:
       - name: Check out repository
@@ -25,6 +43,22 @@ jobs:
           java-version: '17'
           cache: maven
 
+      - name: Initialize PostgreSQL test schema
+        run: >-
+          docker exec -i "${{ job.services.postgres.id }}"
+          psql -U morris_test -d morris_concurrency_test
+          --set=ON_ERROR_STOP=1 --single-transaction
+          < backend/src/main/resources/db/init.sql
+
+      - name: Set up Node for browser state tests
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Check browser JavaScript
+        run: |
+          node --check backend/src/main/resources/static/app.js
+          node --test backend/src/test/frontend/session.test.cjs
+
       - name: Run tests
         run: mvn --batch-mode --no-transfer-progress verify
-

@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="description" content="Nine Men's Morris real-time multiplayer board">
-    <title>Nine Men's Morris · Live Match</title>
+    <title>九子棋 · Han Zhu</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23291f19'/%3E%3Ccircle cx='18' cy='18' r='7' fill='%23f2e7d5'/%3E%3Ccircle cx='46' cy='18' r='7' fill='%23d16a45'/%3E%3Ccircle cx='32' cy='46' r='7' fill='%23f2e7d5'/%3E%3C/svg%3E">
     <link rel="stylesheet" href="/styles.css">
     <script defer src="/app.js"></script>
@@ -19,32 +19,38 @@
             <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
             <span>
                 <strong>Nine Men’s Morris</strong>
-                <small>Live multiplayer</small>
+                <small>九子棋 · 双人在线对局</small>
             </span>
         </a>
         <div class="connection-pill" id="connectionPill" data-state="offline">
             <span class="connection-dot" aria-hidden="true"></span>
-            <span id="connectionText">准备连接</span>
+            <span id="connectionText">尚未进入对局</span>
         </div>
     </header>
 
     <section class="hero" id="setupPanel">
         <div class="hero-copy">
-            <p class="eyebrow">REAL-TIME BOARD · STOMP / WEBSOCKET</p>
+            <p class="eyebrow">九子棋 · 双人对局</p>
             <h1>两扇浏览器，<br><em>同一盘棋。</em></h1>
-            <p class="hero-lead">一方创建对局并分享编号，另一方加入。每次操作经服务端确认后，会立即推送到双方棋盘。</p>
+            <p class="hero-lead">创建一盘棋，邀请一位朋友。九枚棋子，三子成磨，在方寸之间寻找下一步。</p>
             <div class="feature-row" aria-label="Highlights">
-                <span>事务提交后推送</span>
-                <span>Token订阅鉴权</span>
-                <span>版本冲突保护</span>
+                <span>三子成磨</span>
+                <span>链接邀请好友</span>
+                <span>支持恢复对局</span>
             </div>
         </div>
 
         <div class="entry-grid">
+            <div class="recovery-card" id="recoveryCard" hidden>
+                <h2>继续上一盘棋</h2>
+                <p>返回入口和临时断网会保留身份。请勿关闭标签页或清除浏览器存储；姓名不能代替凭证。</p>
+                <button class="button button-dark" id="recoverSession" type="button">恢复对局 / 重试加入</button>
+                <button class="text-button" id="clearSession" type="button">永久清除保存的玩家身份</button>
+            </div>
             <form class="entry-card entry-card-primary" id="createForm">
                 <div class="entry-number">01</div>
                 <div>
-                    <p class="card-kicker">WHITE · HOST</p>
+                    <p class="card-kicker">白方 · 先手</p>
                     <h2>创建新对局</h2>
                     <p>成为白方，等待另一位玩家加入。</p>
                 </div>
@@ -58,7 +64,7 @@
             <form class="entry-card" id="joinForm">
                 <div class="entry-number">02</div>
                 <div>
-                    <p class="card-kicker">BLACK · GUEST</p>
+                    <p class="card-kicker">黑方 · 后手</p>
                     <h2>加入已有对局</h2>
                     <p>输入白方分享的对局编号，成为黑方。</p>
                 </div>
@@ -70,38 +76,41 @@
                     <span>对局编号</span>
                     <input id="joinGameId" name="gameId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" required>
                 </label>
-                <button class="button button-outline" type="submit">加入并实时订阅 <span>→</span></button>
+                <button class="button button-outline" type="submit">加入对局 <span>→</span></button>
             </form>
         </div>
     </section>
 
-    <section class="game-layout is-preview" id="gamePanel" aria-label="Live game board">
+    <section hidden class="game-layout" id="gamePanel" aria-label="Live game board">
         <aside class="game-sidebar">
             <div>
-                <p class="eyebrow">MATCH CONTROL</p>
+                <p class="eyebrow">这一盘棋</p>
                 <h2>对局信息</h2>
             </div>
             <dl class="match-meta">
                 <div><dt>你的身份</dt><dd id="playerSide">—</dd></div>
-                <div><dt>对局版本</dt><dd id="gameVersion">0</dd></div>
+
                 <div><dt>当前阶段</dt><dd id="gamePhase">等待开始</dd></div>
                 <div><dt>轮到</dt><dd id="currentPlayer">—</dd></div>
             </dl>
             <div class="game-id-block">
                 <span>对局编号</span>
                 <code id="gameIdText">创建对局后显示</code>
-                <button class="text-button" id="copyGameId" type="button" disabled>复制编号</button>
+                <button class="text-button" id="copyGameId" type="button" disabled>复制邀请链接</button>
+                <input id="inviteLink" class="invite-link" aria-label="邀请链接，可选择复制" readonly hidden>
             </div>
+            <p class="operation-notice" id="operationNotice" role="status" hidden></p>
+            <button class="button button-outline" id="retryAction" type="button" hidden>重试未确认操作</button>
             <button class="button button-quiet" id="leaveGame" type="button">返回入口</button>
         </aside>
 
         <section class="board-card">
             <div class="turn-banner">
                 <div>
-                    <span class="turn-label">CURRENT ACTION</span>
+                    <span class="turn-label">下一步</span>
                     <strong id="actionPrompt">创建或加入对局后即可操作</strong>
                 </div>
-                <span class="live-badge"><i></i> LIVE</span>
+                <span class="live-badge" id="realtimeBadge" data-state="offline">未连接</span>
             </div>
 
             <div class="board-wrap">
@@ -117,27 +126,27 @@
             </div>
 
             <div class="legend">
-                <span><i class="legend-piece white"></i> White</span>
-                <span><i class="legend-piece black"></i> Black</span>
-                <span><i class="legend-ring"></i> 可操作位置</span>
+                <span><i class="legend-piece white"></i> 白方</span>
+                <span><i class="legend-piece black"></i> 黑方</span>
+                <span><i class="legend-ring"></i> 可选棋子 / 目标</span>
             </div>
         </section>
 
         <aside class="activity-panel">
-            <div class="player-card white-player">
+            <div class="player-card white-player" id="whiteCard">
                 <span class="player-color"></span>
-                <div><small>WHITE</small><strong id="whitePlayerName">Alice</strong></div>
-                <span class="piece-count" id="whitePieces">9</span>
+                <div><small id="whiteRole">白方</small><strong id="whitePlayerName">Alice</strong></div>
+                <div class="piece-stats"><span>待落 <b id="whitePieces">9</b></span><span>在盘 <b id="whiteOnBoard">0</b></span></div>
             </div>
-            <div class="player-card black-player">
+            <div class="player-card black-player" id="blackCard">
                 <span class="player-color"></span>
-                <div><small>BLACK</small><strong id="blackPlayerName">等待加入</strong></div>
-                <span class="piece-count" id="blackPieces">9</span>
+                <div><small id="blackRole">黑方</small><strong id="blackPlayerName">等待加入</strong></div>
+                <div class="piece-stats"><span>待落 <b id="blackPieces">9</b></span><span>在盘 <b id="blackOnBoard">0</b></span></div>
             </div>
             <div class="activity-log-card">
                 <div class="section-heading">
-                    <div><p class="card-kicker">LIVE FEED</p><h3>实时事件</h3></div>
-                    <button class="icon-button" id="refreshGame" type="button" title="Refresh game" disabled>↻</button>
+                    <div><p class="card-kicker">对局动态</p><h3>最近动态</h3></div>
+                    <button class="icon-button" id="refreshGame" type="button" title="同步最新棋局" aria-label="同步最新棋局" disabled>↻</button>
                 </div>
                 <ol class="activity-log" id="activityLog" aria-live="polite">
                     <li><time>—</time><span>等待建立对局会话</span></li>
@@ -145,6 +154,8 @@
             </div>
         </aside>
     </section>
+    <details class="rules-panel" open><summary>一分钟了解规则</summary><ol><li><strong>轮流落子：</strong>双方各九子，白方先手，放在空的交点上。</li><li><strong>三子成磨：</strong>沿棋盘连线形成三子一线，可移除对方一子。优先移除不在磨中的棋子。</li><li><strong>移动与飞行：</strong>落子结束后沿线移动；只剩三子时可飞到任意空位。</li><li><strong>赢下对局：</strong>对方落子结束后不足三子，或无合法移动时获胜。</li></ol></details>
+    <footer class="site-footer"><span>Han Zhu · Nine Men’s Morris</span><details><summary>项目与演示说明</summary><p>Java 17 / Spring Boot 单体应用，独立规则引擎。REST 执行操作，原生 WebSocket 推送，REST 快照恢复遗漏状态。身份保存在当前标签页；邀请链接不包含玩家凭证。</p><p>演示双方时，请使用两个独立浏览器或普通窗口与无痕窗口。</p><p>当前棋局版本：<span id="gameVersion">—</span></p></details></footer>
 </main>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
