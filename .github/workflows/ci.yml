@@ -13,24 +13,6 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_DB: morris_concurrency_test
-          POSTGRES_USER: morris_test
-          POSTGRES_PASSWORD: ci-only-password
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U morris_test -d morris_concurrency_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-    env:
-      PG_TEST_URL: jdbc:postgresql://localhost:5432/morris_concurrency_test
-      PG_TEST_USERNAME: morris_test
-      PG_TEST_PASSWORD: ci-only-password
 
     steps:
       - name: Check out repository

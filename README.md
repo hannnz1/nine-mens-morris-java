@@ -211,22 +211,9 @@ node --check backend/src/main/resources/static/app.js
 node --test backend/src/test/frontend/session.test.cjs
 ```
 
-前端测试需要 Node.js 22+。不设置 `PG_TEST_URL` 时，真实 PostgreSQL 测试会跳过，不能把默认构建通过等同于完成全部并发验证。
+前端测试需要 Node.js 22+。`mvn --batch-mode --no-transfer-progress verify` 现在会通过 Testcontainers 自动启动一个真实的 PostgreSQL 16 容器，完整运行并发测试套件——本地需要运行 Docker。
 
-### 真实 PostgreSQL 并发测试
-
-先创建独立的 `morris_concurrency_test` 数据库和角色；测试连接空库时会自动执行 Flyway 迁移，然后设置连接参数：
-
-```powershell
-$env:PG_TEST_URL = 'jdbc:postgresql://localhost:5432/morris_concurrency_test'
-$env:PG_TEST_USERNAME = 'morris_test'
-$env:PG_TEST_PASSWORD = 'your-test-password'
-mvn --batch-mode --no-transfer-progress verify
-```
-
-该套测试会清理测试库中的棋局和幂等记录，**不能指向线上或业务数据库**。覆盖并发加入、相同请求重试、冲突操作、幂等键复用、锁范围、回滚、锁超时，以及数据库外键、唯一约束和级联删除行为。
-
-GitHub Actions 配置了 Java 17、Node.js 22 和 PostgreSQL 16，并在执行测试前显式初始化独立测试库。实际 CI 结果以[工作流页面](https://github.com/hannnz1/nine-mens-morris-java/actions/workflows/ci.yml)为准。
+GitHub Actions 配置了 Java 17、Node.js 22；`ubuntu-latest` runner 自带的 Docker 守护进程供 Testcontainers 使用，无需额外的 `services: postgres` 配置。实际 CI 结果以[工作流页面](https://github.com/hannnz1/nine-mens-morris-java/actions/workflows/ci.yml)为准。
 
 ### 双客户端与 REST 验证脚本
 
