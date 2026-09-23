@@ -43,8 +43,9 @@ public class GameController {
 
     @GetMapping("/{id}/session")
     public GameResponse restore(@PathVariable("id") UUID id,
-                                @RequestHeader("X-Player-Token") String playerToken) {
-        return gameSessions.restore(id, playerToken);
+                                @RequestHeader(value = "Authorization", required = false) String authorization,
+                                @RequestHeader(value = "X-Player-Token", required = false) String legacyToken) {
+        return gameSessions.restore(id, bearerToken(authorization), legacyToken);
     }
 
     @PostMapping("/{id}/join")
@@ -56,9 +57,16 @@ public class GameController {
     @PostMapping("/{id}/actions")
     public GameResponse action(
             @PathVariable("id") UUID id,
-            @RequestHeader("X-Player-Token") String playerToken,
+            @RequestHeader(value = "Authorization", required = false) String authorization,
+            @RequestHeader(value = "X-Player-Token", required = false) String legacyToken,
             @RequestHeader("Idempotency-Key") String idempotencyKey,
             @Valid @RequestBody ActionRequest request) {
-        return gameSessions.performAction(id, playerToken, idempotencyKey, request);
+        return gameSessions.performAction(id, bearerToken(authorization), legacyToken, idempotencyKey, request);
+    }
+
+    private String bearerToken(String authorizationHeader) {
+        return (authorizationHeader != null && authorizationHeader.startsWith("Bearer "))
+                ? authorizationHeader.substring("Bearer ".length())
+                : null;
     }
 }

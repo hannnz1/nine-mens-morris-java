@@ -43,17 +43,20 @@ public class GameSessionService {
     private final TokenService tokens;
     private final ObjectMapper objectMapper;
     private final GameWebSocketHandler gameUpdates;
+    private final SeatResolver seatResolver;
 
     public GameSessionService(GameSessionRepository games,
                               IdempotencyRecordRepository idempotencyRecords,
                               TokenService tokens,
                               ObjectMapper objectMapper,
-                              GameWebSocketHandler gameUpdates) {
+                              GameWebSocketHandler gameUpdates,
+                              SeatResolver seatResolver) {
         this.games = games;
         this.idempotencyRecords = idempotencyRecords;
         this.tokens = tokens;
         this.objectMapper = objectMapper;
         this.gameUpdates = gameUpdates;
+        this.seatResolver = seatResolver;
     }
 
     @Transactional
@@ -104,22 +107,21 @@ public class GameSessionService {
     }
 
     @Transactional(readOnly = true)
-    public GameResponse restore(UUID id, String playerToken) {
-        validatePlayerToken(playerToken);
+    public GameResponse restore(UUID id, String bearerToken, String legacySeatToken) {
         GameSessionEntity entity = findGame(id);
-        authenticate(entity, playerToken);
+        seatResolver.resolve(entity, bearerToken, legacySeatToken);
         return toResponse(entity, readState(entity));
     }
 
     @Transactional(isolation = Isolation.READ_COMMITTED)
-    public GameResponse performAction(UUID id, String playerToken, String idempotencyKey,
+    public GameResponse performAction(UUID id, String bearerToken, String legacySeatToken, String idempotencyKey,
                                       ActionRequest request) {
         validateIdempotencyKey(idempotencyKey);
-        validatePlayerToken(playerToken);
-        String fingerprint = tokens.hash(playerToken + ":" + writeJson(request));
+        String credential = bearerToken != null ? bearerToken : legacySeatToken;
+        String fingerprint = tokens.hash(credential + ":" + writeJson(request));
 
         GameSessionEntity entity = findGameForUpdate(id);
-        Player player = authenticate(entity, playerToken);
+        Player player = seatResolver.resolve(entity, bearerToken, legacySeatToken);
         // Read after acquiring the game lock so concurrent retries see the committed result.
         // Replay before checking the version/turn, which change after a successful action.
         var previous = idempotencyRecords.findByGameIdAndIdempotencyKey(id, idempotencyKey);
@@ -167,17 +169,6 @@ public class GameSessionService {
                 new ApiException(HttpStatus.NOT_FOUND, "GAME_NOT_FOUND", "The game does not exist"));
     }
 
-    private Player authenticate(GameSessionEntity entity, String playerToken) {
-        if (tokens.matches(playerToken, entity.getWhiteTokenHash())) {
-            return Player.WHITE;
-        }
-        if (tokens.matches(playerToken, entity.getBlackTokenHash())) {
-            return Player.BLACK;
-        }
-        throw new ApiException(HttpStatus.FORBIDDEN, "INVALID_PLAYER_TOKEN",
-                "The player token is invalid for this game");
-    }
-
     private GameResponse toResponse(GameSessionEntity entity, GameState state) {
         GameEngine engine = GameEngine.restore(state);
         Map<BoardPosition, List<BoardPosition>> legalMoves = new LinkedHashMap<>();
@@ -201,13 +192,6 @@ public class GameSessionService {
         if (key == null || key.isBlank() || key.length() > 100) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_IDEMPOTENCY_KEY",
                     "Idempotency-Key must contain between 1 and 100 characters");
-        }
-    }
-
-    private void validatePlayerToken(String token) {
-        if (token == null || token.isBlank() || token.length() > 128) {
-            throw new ApiException(HttpStatus.FORBIDDEN, "INVALID_PLAYER_TOKEN",
-                    "The player token is invalid for this game");
         }
     }
 

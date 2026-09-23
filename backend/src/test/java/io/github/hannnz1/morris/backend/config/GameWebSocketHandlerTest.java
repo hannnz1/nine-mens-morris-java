@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.GameResponse;
 import io.github.hannnz1.morris.backend.persistence.GameSessionEntity;
 import io.github.hannnz1.morris.backend.persistence.GameSessionRepository;
+import io.github.hannnz1.morris.backend.persistence.PlayerRepository;
+import io.github.hannnz1.morris.backend.service.SeatResolver;
 import io.github.hannnz1.morris.backend.service.TokenService;
 import io.github.hannnz1.morris.engine.GameEngine;
 import org.junit.jupiter.api.AfterEach;
@@ -25,8 +27,10 @@ import static org.mockito.Mockito.*;
 class GameWebSocketHandlerTest {
     private final GameSessionRepository games = mock(GameSessionRepository.class);
     private final TokenService tokens = new TokenService();
+    private final PlayerRepository players = mock(PlayerRepository.class);
+    private final SeatResolver seatResolver = new SeatResolver(tokens, players);
     private final ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
-    private final GameWebSocketHandler handler = new GameWebSocketHandler(games, tokens, mapper);
+    private final GameWebSocketHandler handler = new GameWebSocketHandler(games, seatResolver, mapper);
     private final UUID gameId = UUID.randomUUID();
 
     @AfterEach void close() { handler.shutdown(); }

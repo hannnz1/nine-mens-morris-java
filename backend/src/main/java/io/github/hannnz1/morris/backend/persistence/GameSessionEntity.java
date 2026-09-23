@@ -45,6 +45,12 @@ public class GameSessionEntity {
     @Column(name = "updated_at", nullable = false)
     private Instant updatedAt;
 
+    @Column(name = "white_player_id")
+    private UUID whitePlayerId;
+
+    @Column(name = "black_player_id")
+    private UUID blackPlayerId;
+
     protected GameSessionEntity() {
     }
 
@@ -113,5 +119,18 @@ public class GameSessionEntity {
         this.blackTokenHash = tokenHash;
         this.status = "IN_PROGRESS";
         this.updatedAt = updatedAt;
+    }
+
+    public UUID getWhitePlayerId() {
+        return whitePlayerId;
+    }
+
+    public UUID getBlackPlayerId() {
+        return blackPlayerId;
+    }
+
+    public void assignPlayers(UUID whitePlayerId, UUID blackPlayerId) {
+        this.whitePlayerId = whitePlayerId;
+        this.blackPlayerId = blackPlayerId;
     }
 }

@@ -2,9 +2,10 @@ package io.github.hannnz1.morris.backend.config;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hannnz1.morris.backend.api.ApiException;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.GameResponse;
 import io.github.hannnz1.morris.backend.persistence.GameSessionRepository;
-import io.github.hannnz1.morris.backend.service.TokenService;
+import io.github.hannnz1.morris.backend.service.SeatResolver;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -26,7 +27,7 @@ import java.util.concurrent.TimeUnit;
 public class GameWebSocketHandler extends TextWebSocketHandler {
     private static final Logger LOGGER = LoggerFactory.getLogger(GameWebSocketHandler.class);
     private final GameSessionRepository games;
-    private final TokenService tokens;
+    private final SeatResolver seatResolver;
     private final ObjectMapper mapper;
     private final Map<String, Connection> connections = new ConcurrentHashMap<>();
     private final ScheduledThreadPoolExecutor deadlines = new ScheduledThreadPoolExecutor(1, runnable -> {
@@ -35,9 +36,9 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
         return thread;
     });
 
-    public GameWebSocketHandler(GameSessionRepository games, TokenService tokens, ObjectMapper mapper) {
+    public GameWebSocketHandler(GameSessionRepository games, SeatResolver seatResolver, ObjectMapper mapper) {
         this.games = games;
-        this.tokens = tokens;
+        this.seatResolver = seatResolver;
         this.mapper = mapper;
         deadlines.setRemoveOnCancelPolicy(true);
     }
@@ -83,9 +84,17 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
                     return;
                 }
                 var game = games.findById(gameId).orElse(null);
-                if (game == null || !(tokens.matches(token, game.getWhiteTokenHash())
-                        || (!game.getBlackTokenHash().isEmpty() && tokens.matches(token, game.getBlackTokenHash())))) {
+                if (game == null) {
                     reject(connection, "INVALID_PLAYER_TOKEN", CloseStatus.POLICY_VIOLATION);
+                    return;
+                }
+                try {
+                    // The same token is tried both as a Bearer player token and as a legacy seat
+                    // token: both are independent 256-bit random values from TokenService.generate(),
+                    // so there is no realistic collision between the two token spaces.
+                    seatResolver.resolve(game, token, token);
+                } catch (ApiException exception) {
+                    reject(connection, exception.code(), CloseStatus.POLICY_VIOLATION);
                     return;
                 }
                 // Register BEFORE acknowledging. A snapshot read after this acknowledgement
