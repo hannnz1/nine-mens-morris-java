@@ -142,6 +142,39 @@ class GameApiIntegrationTest extends PostgresIntegrationTest {
                 .andExpect(jsonPath("$.code").value("AUTH_REQUIRED"));
     }
 
+    // Regression test for a bug found in review: SeatResolver.resolve treats an oversized (>128
+    // char) bearer token as unusable and authenticates via the legacy X-Player-Token instead, so
+    // the idempotency fingerprint must key off that same legacy token too - not the oversized,
+    // never-authenticated-with bearer value. Sending two different oversized bearer values under
+    // the same Idempotency-Key/legacy-token/body must therefore replay (200 both times), not
+    // conflict: if the fingerprint ever hashed the oversized bearer instead, these two differing
+    // bearer values would produce two different fingerprints and the second call would 409.
+    @Test
+    void idempotencyReplayIgnoresAnOversizedBearerTokenThatDidNotAuthenticateTheRequest() throws Exception {
+        CreatedGame created = createGame();
+        String body = actionBody("PLACE", null, "A1", 1);
+
+        MvcResult first = mockMvc.perform(post("/api/v1/games/{id}/actions", created.id())
+                        .header("Authorization", "Bearer " + "a".repeat(200))
+                        .header("X-Player-Token", created.whiteToken())
+                        .header("Idempotency-Key", "oversized-bearer-key")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk())
+                .andReturn();
+
+        MvcResult replay = mockMvc.perform(post("/api/v1/games/{id}/actions", created.id())
+                        .header("Authorization", "Bearer " + "b".repeat(200))
+                        .header("X-Player-Token", created.whiteToken())
+                        .header("Idempotency-Key", "oversized-bearer-key")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk())
+                .andReturn();
+
+        assertThat(json(replay)).isEqualTo(json(first));
+    }
+
     @Test
     void mapsIllegalGameActionsToAStableApiError() throws Exception {
         CreatedGame created = createGame();

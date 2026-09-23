@@ -84,10 +84,16 @@ public class SeatResolver {
         return value == null || value.isBlank();
     }
 
+    // Package-private (not private), for the same reason as isBlank: this is the exact predicate
+    // resolve() uses to decide whether to try the bearer branch at all, so GameSessionService must
+    // use this - not a plain isBlank check - to pick the fingerprint credential. Two different
+    // predicates at the two call sites is exactly how the fingerprint-vs-authenticated-credential
+    // mismatch bug reappeared once (see GameSessionService.performAction).
+    //
     // A present credential is only worth hashing/looking up if it's within the size a real token
     // can be; this avoids hashing arbitrarily large header values (same cap the old, now-removed
     // GameSessionService.validatePlayerToken enforced).
-    private boolean usable(String value) {
+    static boolean usable(String value) {
         return !isBlank(value) && value.length() <= MAX_TOKEN_LENGTH;
     }
 }
