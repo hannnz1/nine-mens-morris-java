@@ -84,6 +84,40 @@ class RoomCodeIntegrationTest extends PostgresIntegrationTest {
         assertThat(joinResponse.getBody().get("code")).isEqualTo("CANNOT_JOIN_OWN_GAME");
     }
 
+    // Regression for M1 final whole-branch review C1: createForPlayer stores null
+    // white_token_hash/black_token_hash, and the anonymous (legacy, body-based) join path used to
+    // call TokenService.matches against that null hash directly, throwing an NPE -> 500. This is
+    // exactly the pre-M1 "copy invite link" flow, still reachable whenever a tab has no saved
+    // player identity. Must now return a clean 4xx, never a 500.
+    @Test
+    void anonymousJoinAgainstABearerCreatedGameFailsCleanlyInsteadOfCrashing() {
+        String whiteClientToken = "q".repeat(43);
+        rest.postForEntity(url("/api/v1/players"), Map.of("nickname", "Alice", "clientToken", whiteClientToken), Map.class);
+
+        HttpHeaders createHeaders = new HttpHeaders();
+        createHeaders.setBearerAuth(whiteClientToken);
+        createHeaders.set("Idempotency-Key", "anon-join-regression-create");
+        createHeaders.setContentType(MediaType.APPLICATION_JSON);
+        var createResponse = rest.exchange(url("/api/v1/games"), HttpMethod.POST,
+                new HttpEntity<>(Map.of(), createHeaders), Map.class);
+        assertThat(createResponse.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        Object gameId = ((Map<?, ?>) createResponse.getBody().get("game")).get("id");
+
+        HttpHeaders anonymousJoinHeaders = new HttpHeaders();
+        anonymousJoinHeaders.setContentType(MediaType.APPLICATION_JSON);
+        var joinResponse = rest.exchange(url("/api/v1/games/" + gameId + "/join"), HttpMethod.POST,
+                new HttpEntity<>(Map.of("blackPlayer", "Mallory", "joinToken", "g".repeat(43)), anonymousJoinHeaders),
+                Map.class);
+        assertThat(joinResponse.getStatusCode().is4xxClientError()).isTrue();
+        assertThat(joinResponse.getBody().get("code")).isEqualTo("INVALID_PLAYER_TOKEN");
+
+        // Also an empty-token anonymous join must not crash.
+        var emptyTokenJoin = rest.exchange(url("/api/v1/games/" + gameId + "/join"), HttpMethod.POST,
+                new HttpEntity<>(Map.of("blackPlayer", "Mallory", "joinToken", ""), anonymousJoinHeaders),
+                Map.class);
+        assertThat(emptyTokenJoin.getStatusCode().is4xxClientError()).isTrue();
+    }
+
     private String url(String path) {
         return "http://localhost:" + port + path;
     }

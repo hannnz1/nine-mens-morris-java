@@ -20,7 +20,6 @@ import io.github.hannnz1.morris.backend.persistence.IdempotencyRecordRepository;
 import io.github.hannnz1.morris.backend.persistence.PlayerEntity;
 import io.github.hannnz1.morris.backend.persistence.PlayerIdempotencyRecordEntity;
 import io.github.hannnz1.morris.backend.persistence.PlayerIdempotencyRecordRepository;
-import io.github.hannnz1.morris.backend.persistence.PlayerRepository;
 import io.github.hannnz1.morris.engine.BoardPosition;
 import io.github.hannnz1.morris.engine.GameAction;
 import io.github.hannnz1.morris.engine.GameEngine;
@@ -53,9 +52,9 @@ public class GameSessionService {
     private final ObjectMapper objectMapper;
     private final GameWebSocketHandler gameUpdates;
     private final SeatResolver seatResolver;
-    private final PlayerRepository players;
     private final RoomCodeGenerator roomCodes;
     private final PlayerIdempotencyRecordRepository playerIdempotencyRecords;
+    private final RateLimiter rateLimiter;
 
     public GameSessionService(GameSessionRepository games,
                               IdempotencyRecordRepository idempotencyRecords,
@@ -63,18 +62,18 @@ public class GameSessionService {
                               ObjectMapper objectMapper,
                               GameWebSocketHandler gameUpdates,
                               SeatResolver seatResolver,
-                              PlayerRepository players,
                               RoomCodeGenerator roomCodes,
-                              PlayerIdempotencyRecordRepository playerIdempotencyRecords) {
+                              PlayerIdempotencyRecordRepository playerIdempotencyRecords,
+                              RateLimiter rateLimiter) {
         this.games = games;
         this.idempotencyRecords = idempotencyRecords;
         this.tokens = tokens;
         this.objectMapper = objectMapper;
         this.gameUpdates = gameUpdates;
         this.seatResolver = seatResolver;
-        this.players = players;
         this.roomCodes = roomCodes;
         this.playerIdempotencyRecords = playerIdempotencyRecords;
+        this.rateLimiter = rateLimiter;
     }
 
     @Transactional
@@ -99,6 +98,18 @@ public class GameSessionService {
     @Transactional(isolation = Isolation.READ_COMMITTED)
     public JoinGameResponse join(UUID id, JoinGameRequest request) {
         GameSessionEntity entity = findGameForUpdate(id);
+        // A Bearer/identity-created game (createForPlayer) has a null white_token_hash - it has no
+        // legacy credential at all, so the anonymous join flow (self-generated joinToken, no
+        // player identity) is not a valid way to claim its black seat: silently allowing it would
+        // leave black_player_id null forever, breaking that player's "my games" list, and would
+        // never let a real identity re-claim the seat. Reject cleanly instead of letting
+        // TokenService.matches's null-hash guard (see M1 final review C1/I1) make this branch a
+        // silent success. The frontend's join flow routes identity-aware joins through the Bearer
+        // POST /join instead of this method when a player identity exists (see app.js joinGame).
+        if (entity.getWhiteTokenHash() == null) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "INVALID_PLAYER_TOKEN",
+                    "This game requires a player identity to join; use the identity-aware join flow");
+        }
         String blackToken = request.joinToken();
         if (tokens.matches(blackToken, entity.getWhiteTokenHash())) {
             throw new ApiException(HttpStatus.FORBIDDEN, "INVALID_JOIN_TOKEN", "Use an independent join credential");
@@ -121,6 +132,11 @@ public class GameSessionService {
 
     @Transactional
     public CreateGameResponse createForPlayer(PlayerEntity white, String idempotencyKey) {
+        // 20/min per player, per spec §3.5. Checked before the idempotency lookup so a retried
+        // request under the same key is never itself penalized twice for the same logical create.
+        if (!rateLimiter.tryAcquire("game-create:" + white.getId(), 20, java.time.Duration.ofMinutes(1))) {
+            throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "RATE_LIMITED", "Too many games created recently; try again shortly");
+        }
         String fingerprint = tokens.hash(white.getId() + ":create:" + idempotencyKey);
         var previous = playerIdempotencyRecords.findByIdPlayerIdAndIdIdempotencyKey(white.getId(), idempotencyKey);
         if (previous.isPresent()) {
@@ -130,8 +146,7 @@ public class GameSessionService {
             return readJson(previous.get().getResponseJson(), CreateGameResponse.class);
         }
 
-        long activeGames = games.countByWhitePlayerIdOrBlackPlayerIdAndStatusIn(
-                white.getId(), white.getId(), List.of("WAITING_FOR_PLAYER", "IN_PROGRESS"));
+        long activeGames = games.countActiveGamesForPlayer(white.getId(), ACTIVE_STATUSES);
         if (activeGames >= 5) {
             throw new ApiException(HttpStatus.CONFLICT, "TOO_MANY_ACTIVE_GAMES", "You already have 5 active or waiting games");
         }

@@ -29,10 +29,12 @@ public class GameSessionEntity {
     @Column(name = "black_player", length = 50)
     private String blackPlayer;
 
-    @Column(name = "white_token_hash", nullable = false, length = 64)
+    // V2 migration dropped the NOT NULL constraint on both columns: a Bearer/identity-created game
+    // (GameSessionService.createForPlayer) legitimately stores null here (see M1 final review M1).
+    @Column(name = "white_token_hash", length = 64)
     private String whiteTokenHash;
 
-    @Column(name = "black_token_hash", nullable = false, length = 64)
+    @Column(name = "black_token_hash", length = 64)
     private String blackTokenHash;
 
     @Column(nullable = false, length = 20)

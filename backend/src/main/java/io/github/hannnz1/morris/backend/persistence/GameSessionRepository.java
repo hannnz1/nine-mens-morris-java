@@ -20,7 +20,17 @@ public interface GameSessionRepository extends JpaRepository<GameSessionEntity, 
 
     Optional<GameSessionEntity> findByRoomCodeAndStatusIn(String roomCode, java.util.List<String> statuses);
 
-    long countByWhitePlayerIdOrBlackPlayerIdAndStatusIn(UUID whitePlayerId, UUID blackPlayerId, java.util.List<String> statuses);
+    // NOT a derived-query method (countByWhitePlayerIdOrBlackPlayerIdAndStatusIn): Spring Data
+    // derived query names bind "And" more tightly than "Or", so that method name actually means
+    // "white = ? OR (black = ? AND status IN ?)", not the intended "(white = ? OR black = ?) AND
+    // status IN ?" - any player who had ever created 5 games (regardless of status) would be
+    // permanently blocked from creating a 6th. See M1 final whole-branch review C2.
+    @Query("""
+        select count(game) from GameSessionEntity game
+        where (game.whitePlayerId = :playerId or game.blackPlayerId = :playerId)
+          and game.status in :statuses
+        """)
+    long countActiveGamesForPlayer(@Param("playerId") UUID playerId, @Param("statuses") List<String> statuses);
 
     // Two separate queries rather than a single "(:before is null or ...)" JPQL predicate: binding
     // a null Instant into that OR clause makes the Postgres extended-query protocol unable to infer

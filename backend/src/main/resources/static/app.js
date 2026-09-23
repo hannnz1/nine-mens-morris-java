@@ -251,6 +251,15 @@ async function joinGame(event) {
     if (!blackPlayer || !/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(gameId)) {
         showToast("请输入玩家名称和有效的对局编号"); return;
     }
+    if (client.identity) {
+        // Identity-aware path: same Bearer POST /join used by the room-code flow
+        // (joinRoomAsIdentity), so the game is recorded against this player and shows up in this
+        // browser's own "我的对局" list. The legacy anonymous body-based join below is now only a
+        // fallback for tabs with no saved identity - and the backend rejects it outright against a
+        // Bearer-created game (GameSessionService.join), so it must not be the default any more.
+        await joinRoomAsIdentity(gameId);
+        return;
+    }
     try {
         client.pendingJoin = { gameId, blackPlayer, joinToken: randomToken() };
         saveSession(); // Persist the proof BEFORE sending a request that may claim the seat.

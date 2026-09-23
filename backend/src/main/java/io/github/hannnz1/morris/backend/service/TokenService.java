@@ -34,6 +34,13 @@ public class TokenService {
     }
 
     public boolean matches(String token, String expectedHash) {
+        // A null/blank stored hash means "no legacy credential exists for this seat" (e.g. a
+        // Bearer-identity-created game, where white/black_token_hash are legitimately NULL) -
+        // that must be a clean "no match", not an NPE from hashing against a null byte array.
+        // See M1 final whole-branch review C1/I1.
+        if (expectedHash == null || expectedHash.isEmpty()) {
+            return false;
+        }
         return MessageDigest.isEqual(
                 hash(token).getBytes(StandardCharsets.US_ASCII),
                 expectedHash.getBytes(StandardCharsets.US_ASCII));
