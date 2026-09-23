@@ -1,8 +1,10 @@
 package io.github.hannnz1.morris.backend.api;
 
 import io.github.hannnz1.morris.backend.api.PlayerApiDtos.CreatePlayerRequest;
+import io.github.hannnz1.morris.backend.api.PlayerApiDtos.GameListResponse;
 import io.github.hannnz1.morris.backend.api.PlayerApiDtos.PlayerResponse;
 import io.github.hannnz1.morris.backend.api.PlayerApiDtos.RenamePlayerRequest;
+import io.github.hannnz1.morris.backend.service.GameSessionService;
 import io.github.hannnz1.morris.backend.service.PlayerService;
 import io.github.hannnz1.morris.backend.service.RateLimiter;
 import jakarta.servlet.http.HttpServletRequest;
@@ -14,9 +16,11 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.time.Duration;
+import java.time.Instant;
 
 @RestController
 @RequestMapping("/api/v1/players")
@@ -24,10 +28,12 @@ public class PlayerController {
 
     private final PlayerService playerService;
     private final RateLimiter rateLimiter;
+    private final GameSessionService gameSessions;
 
-    public PlayerController(PlayerService playerService, RateLimiter rateLimiter) {
+    public PlayerController(PlayerService playerService, RateLimiter rateLimiter, GameSessionService gameSessions) {
         this.playerService = playerService;
         this.rateLimiter = rateLimiter;
+        this.gameSessions = gameSessions;
     }
 
     // server.forward-headers-strategy: native (application.yml) makes Spring's ForwardedHeaderFilter
@@ -52,6 +58,15 @@ public class PlayerController {
     public PlayerResponse rename(@RequestHeader(value = "Authorization", required = false) String authorization,
                                   @Valid @RequestBody RenamePlayerRequest request) {
         return playerService.rename(bearerToken(authorization), request.nickname());
+    }
+
+    @GetMapping("/me/games")
+    public GameListResponse games(@RequestHeader(value = "Authorization", required = false) String authorization,
+                                   @RequestParam(value = "status", defaultValue = "ACTIVE") String status,
+                                   @RequestParam(value = "before", required = false) Instant before,
+                                   @RequestParam(value = "limit", defaultValue = "20") int limit) {
+        var player = playerService.requirePlayer(bearerToken(authorization));
+        return gameSessions.listForPlayer(player.getId(), status, before, limit);
     }
 
     private String bearerToken(String authorizationHeader) {

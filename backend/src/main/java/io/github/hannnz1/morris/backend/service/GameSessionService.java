@@ -11,6 +11,8 @@ import io.github.hannnz1.morris.backend.api.GameApiDtos.JoinGameRequest;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.JoinGameResponse;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.PlayerCredential;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.RoomLookupResponse;
+import io.github.hannnz1.morris.backend.api.PlayerApiDtos.GameListResponse;
+import io.github.hannnz1.morris.backend.api.PlayerApiDtos.GameSummary;
 import io.github.hannnz1.morris.backend.persistence.GameSessionEntity;
 import io.github.hannnz1.morris.backend.persistence.GameSessionRepository;
 import io.github.hannnz1.morris.backend.persistence.IdempotencyRecordEntity;
@@ -42,6 +44,8 @@ import java.util.UUID;
 public class GameSessionService {
 
     private static final org.slf4j.Logger LOGGER = org.slf4j.LoggerFactory.getLogger(GameSessionService.class);
+    private static final List<String> ACTIVE_STATUSES = List.of("WAITING_FOR_PLAYER", "IN_PROGRESS");
+    private static final List<String> FINISHED_STATUSES = List.of("WHITE_WON", "BLACK_WON");
 
     private final GameSessionRepository games;
     private final IdempotencyRecordRepository idempotencyRecords;
@@ -183,6 +187,23 @@ public class GameSessionService {
         GameSessionEntity entity = games.findByRoomCodeAndStatusIn(roomCode, List.of("WAITING_FOR_PLAYER", "IN_PROGRESS"))
                 .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "GAME_NOT_FOUND", "No open game for this room code"));
         return new RoomLookupResponse(entity.getId(), entity.getStatus(), entity.getWhitePlayer());
+    }
+
+    @Transactional(readOnly = true)
+    public GameListResponse listForPlayer(UUID playerId, String statusFilter, Instant before, int limit) {
+        List<String> statuses = "FINISHED".equals(statusFilter) ? FINISHED_STATUSES : ACTIVE_STATUSES;
+        int boundedLimit = Math.max(1, Math.min(limit, 50));
+        var pageable = org.springframework.data.domain.PageRequest.of(0, boundedLimit);
+        List<GameSessionEntity> rows = before == null
+                ? games.findForPlayer(playerId, statuses, pageable)
+                : games.findForPlayerBefore(playerId, statuses, before, pageable);
+        List<GameSummary> summaries = rows.stream()
+                .map(row -> new GameSummary(row.getId(), row.getStatus(),
+                        playerId.equals(row.getWhitePlayerId()) ? row.getBlackPlayer() : row.getWhitePlayer(),
+                        row.getUpdatedAt()))
+                .toList();
+        Instant nextBefore = summaries.size() == boundedLimit ? summaries.get(summaries.size() - 1).updatedAt() : null;
+        return new GameListResponse(summaries, nextBefore);
     }
 
     private String generateUniqueRoomCode() {
