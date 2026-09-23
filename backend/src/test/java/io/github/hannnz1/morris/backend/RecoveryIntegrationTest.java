@@ -3,13 +3,12 @@ package io.github.hannnz1.morris.backend;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hannnz1.morris.backend.persistence.GameSessionRepository;
 import io.github.hannnz1.morris.backend.service.TokenService;
+import io.github.hannnz1.morris.backend.support.PostgresIntegrationTest;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
-import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
 import io.github.hannnz1.morris.backend.config.GameWebSocketHandler;
-import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.test.web.servlet.MockMvc;
 import java.util.Map;
@@ -20,10 +19,8 @@ import static org.mockito.Mockito.doThrow;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
-@SpringBootTest(properties = "spring.datasource.url=jdbc:h2:mem:recovery;MODE=PostgreSQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE")
 @AutoConfigureMockMvc
-@ActiveProfiles("test")
-class RecoveryIntegrationTest {
+class RecoveryIntegrationTest extends PostgresIntegrationTest {
     @Autowired MockMvc mvc;
     @Autowired ObjectMapper mapper;
     @Autowired GameSessionRepository games;

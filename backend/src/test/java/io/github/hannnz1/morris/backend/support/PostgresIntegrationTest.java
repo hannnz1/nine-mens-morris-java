@@ -1,22 +1,31 @@
 package io.github.hannnz1.morris.backend.support;
 
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.containers.PostgreSQLContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
 
-/** Real PostgreSQL 16 in a disposable container, migrated by Flyway like production. */
-@Testcontainers
+/**
+ * Real PostgreSQL 16 in a disposable container, migrated by Flyway like production.
+ *
+ * <p>The container is started once (a "singleton container", not {@code @Testcontainers}/
+ * {@code @Container}-managed) and shared by every subclass for the life of the JVM, instead of
+ * being stopped and restarted around each test class. Restarting the same {@code GenericContainer}
+ * instance between test classes proved flaky under this suite's growing number of Postgres-backed
+ * test classes (intermittent "connection refused" right after a reported successful restart);
+ * Testcontainers itself recommends this singleton pattern for exactly this reason. The container is
+ * reaped by Testcontainers' Ryuk sidecar when the JVM exits.
+ */
 @SpringBootTest
 @ActiveProfiles("test")
 public abstract class PostgresIntegrationTest {
 
-    @Container
     static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:16-alpine");
+
+    static {
+        POSTGRES.start();
+    }
 
     @DynamicPropertySource
     static void datasourceProperties(DynamicPropertyRegistry registry) {
