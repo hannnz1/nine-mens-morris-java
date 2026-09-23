@@ -823,12 +823,48 @@ async function lookupRoomCode() {
     }
     try {
         const room = await api(`/api/v1/rooms/${code}`);
+        if (client.identity) {
+            // Identity-aware path: join with the saved player identity (Bearer), not the legacy
+            // anonymous form, so the game is recorded against this player and shows up in this
+            // browser's own "我的对局" list too - the room-code flow is the primary way a second
+            // player joins, so this is the common case, not a fallback.
+            await joinRoomAsIdentity(room.gameId);
+            return;
+        }
         elements.joinGameId.value = room.gameId;
         showToast("已找到对局，请输入姓名后点击加入对局");
         const joinNameField = elements.joinForm.elements.blackPlayer;
         if (joinNameField) joinNameField.focus();
     } catch (error) {
         showToast(readableError(error));
+    }
+}
+
+async function joinRoomAsIdentity(gameId) {
+    if (client.entryBusy) return;
+    if (client.active) leaveGame();
+    client.epoch++;
+    client.game = null;
+    const ctx = context();
+    entryBusy(true);
+    try {
+        const response = await api(`/api/v1/games/${gameId}/join`, {
+            method: "POST", headers: { ...authHeader(client.identity.clientToken), "Idempotency-Key": randomToken() }
+        });
+        if (!matches(ctx)) return;
+        // Bearer joins never return a per-game credential (the identity's own bearer token
+        // already authenticates every later request for this game) - see createGame()'s matching
+        // comment for the create-side equivalent.
+        client.session = { gameId: response.game.id, token: client.identity.clientToken,
+            side: "BLACK", playerName: client.identity.nickname, bearer: true };
+        client.roomCode = null;
+        saveSession();
+        enterGame(response.game, "已通过身份加入对局");
+        void renderMyGames();
+    } catch (error) {
+        if (matches(ctx)) showToast(readableError(error));
+    } finally {
+        if (matches(ctx)) entryBusy(false);
     }
 }
 
