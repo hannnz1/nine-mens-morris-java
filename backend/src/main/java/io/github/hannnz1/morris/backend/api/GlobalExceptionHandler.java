@@ -28,7 +28,7 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(ApiException.class)
     ResponseEntity<ApiError> handleApi(ApiException exception, HttpServletRequest request) {
-        return response(exception.status(), exception.code(), exception.getMessage(), request, List.of());
+        return response(exception.status(), exception.code(), exception.getMessage(), request, exception.fieldErrors());
     }
 
     @ExceptionHandler(GameRuleException.class)

@@ -5,6 +5,8 @@ import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import jakarta.persistence.Version;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 import java.time.Instant;
 import java.util.UUID;
@@ -50,6 +52,10 @@ public class GameSessionEntity {
 
     @Column(name = "black_player_id")
     private UUID blackPlayerId;
+
+    @Column(name = "room_code", length = 6, columnDefinition = "char(6)")
+    @JdbcTypeCode(SqlTypes.CHAR)
+    private String roomCode;
 
     protected GameSessionEntity() {
     }
@@ -132,5 +138,13 @@ public class GameSessionEntity {
     public void assignPlayers(UUID whitePlayerId, UUID blackPlayerId) {
         this.whitePlayerId = whitePlayerId;
         this.blackPlayerId = blackPlayerId;
+    }
+
+    public String getRoomCode() {
+        return roomCode;
+    }
+
+    public void assignRoomCode(String roomCode) {
+        this.roomCode = roomCode;
     }
 }

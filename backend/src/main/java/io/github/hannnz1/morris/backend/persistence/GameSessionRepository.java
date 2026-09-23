@@ -14,4 +14,8 @@ public interface GameSessionRepository extends JpaRepository<GameSessionEntity, 
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select game from GameSessionEntity game where game.id = :id")
     Optional<GameSessionEntity> findByIdForUpdate(@Param("id") UUID id);
+
+    Optional<GameSessionEntity> findByRoomCodeAndStatusIn(String roomCode, java.util.List<String> statuses);
+
+    long countByWhitePlayerIdOrBlackPlayerIdAndStatusIn(UUID whitePlayerId, UUID blackPlayerId, java.util.List<String> statuses);
 }

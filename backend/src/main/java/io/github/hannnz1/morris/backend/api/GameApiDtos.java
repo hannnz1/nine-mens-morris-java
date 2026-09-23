@@ -41,10 +41,17 @@ public final class GameApiDtos {
     public record PlayerCredential(Player side, String playerName, String token) {
     }
 
+    public record CreateGameRequestForPlayer() {
+    }
+
     public record CreateGameResponse(
             GameResponse game,
-            PlayerCredential whiteCredential
+            PlayerCredential whiteCredential,
+            String roomCode
     ) {
+    }
+
+    public record RoomLookupResponse(UUID gameId, String status, String whiteNickname) {
     }
 
     public record ActionRequest(

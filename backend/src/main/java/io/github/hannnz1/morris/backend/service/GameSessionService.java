@@ -10,10 +10,15 @@ import io.github.hannnz1.morris.backend.api.GameApiDtos.GameResponse;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.JoinGameRequest;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.JoinGameResponse;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.PlayerCredential;
+import io.github.hannnz1.morris.backend.api.GameApiDtos.RoomLookupResponse;
 import io.github.hannnz1.morris.backend.persistence.GameSessionEntity;
 import io.github.hannnz1.morris.backend.persistence.GameSessionRepository;
 import io.github.hannnz1.morris.backend.persistence.IdempotencyRecordEntity;
 import io.github.hannnz1.morris.backend.persistence.IdempotencyRecordRepository;
+import io.github.hannnz1.morris.backend.persistence.PlayerEntity;
+import io.github.hannnz1.morris.backend.persistence.PlayerIdempotencyRecordEntity;
+import io.github.hannnz1.morris.backend.persistence.PlayerIdempotencyRecordRepository;
+import io.github.hannnz1.morris.backend.persistence.PlayerRepository;
 import io.github.hannnz1.morris.engine.BoardPosition;
 import io.github.hannnz1.morris.engine.GameAction;
 import io.github.hannnz1.morris.engine.GameEngine;
@@ -44,19 +49,28 @@ public class GameSessionService {
     private final ObjectMapper objectMapper;
     private final GameWebSocketHandler gameUpdates;
     private final SeatResolver seatResolver;
+    private final PlayerRepository players;
+    private final RoomCodeGenerator roomCodes;
+    private final PlayerIdempotencyRecordRepository playerIdempotencyRecords;
 
     public GameSessionService(GameSessionRepository games,
                               IdempotencyRecordRepository idempotencyRecords,
                               TokenService tokens,
                               ObjectMapper objectMapper,
                               GameWebSocketHandler gameUpdates,
-                              SeatResolver seatResolver) {
+                              SeatResolver seatResolver,
+                              PlayerRepository players,
+                              RoomCodeGenerator roomCodes,
+                              PlayerIdempotencyRecordRepository playerIdempotencyRecords) {
         this.games = games;
         this.idempotencyRecords = idempotencyRecords;
         this.tokens = tokens;
         this.objectMapper = objectMapper;
         this.gameUpdates = gameUpdates;
         this.seatResolver = seatResolver;
+        this.players = players;
+        this.roomCodes = roomCodes;
+        this.playerIdempotencyRecords = playerIdempotencyRecords;
     }
 
     @Transactional
@@ -74,7 +88,8 @@ public class GameSessionService {
 
         return new CreateGameResponse(
                 toResponse(entity, state),
-                new PlayerCredential(Player.WHITE, entity.getWhitePlayer(), whiteToken));
+                new PlayerCredential(Player.WHITE, entity.getWhitePlayer(), whiteToken),
+                null);
     }
 
     @Transactional(isolation = Isolation.READ_COMMITTED)
@@ -98,6 +113,86 @@ public class GameSessionService {
         publishAfterCommit(id, response);
         return new JoinGameResponse(response,
                 new PlayerCredential(Player.BLACK, entity.getBlackPlayer(), blackToken));
+    }
+
+    @Transactional
+    public CreateGameResponse createForPlayer(PlayerEntity white, String idempotencyKey) {
+        String fingerprint = tokens.hash(white.getId() + ":create:" + idempotencyKey);
+        var previous = playerIdempotencyRecords.findByIdPlayerIdAndIdIdempotencyKey(white.getId(), idempotencyKey);
+        if (previous.isPresent()) {
+            if (!previous.get().getRequestFingerprint().equals(fingerprint)) {
+                throw new ApiException(HttpStatus.CONFLICT, "IDEMPOTENCY_KEY_REUSED", "This idempotency key was already used for a different request");
+            }
+            return readJson(previous.get().getResponseJson(), CreateGameResponse.class);
+        }
+
+        long activeGames = games.countByWhitePlayerIdOrBlackPlayerIdAndStatusIn(
+                white.getId(), white.getId(), List.of("WAITING_FOR_PLAYER", "IN_PROGRESS"));
+        if (activeGames >= 5) {
+            throw new ApiException(HttpStatus.CONFLICT, "TOO_MANY_ACTIVE_GAMES", "You already have 5 active or waiting games");
+        }
+
+        Instant now = Instant.now();
+        GameState state = GameEngine.newGame().state();
+        GameSessionEntity entity = new GameSessionEntity(UUID.randomUUID(), white.getNickname(), null,
+                null, null, "WAITING_FOR_PLAYER", writeJson(state), now);
+        entity.assignPlayers(white.getId(), null);
+        entity.assignRoomCode(generateUniqueRoomCode());
+        entity = games.saveAndFlush(entity);
+
+        CreateGameResponse response = new CreateGameResponse(toResponse(entity, state), null, entity.getRoomCode());
+        playerIdempotencyRecords.saveAndFlush(new PlayerIdempotencyRecordEntity(
+                white.getId(), idempotencyKey, fingerprint, writeJson(response), now));
+        return response;
+    }
+
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public JoinGameResponse joinByBearer(UUID id, PlayerEntity black, String idempotencyKey) {
+        String fingerprint = tokens.hash(black.getId() + ":join:" + id + ":" + idempotencyKey);
+        var previous = playerIdempotencyRecords.findByIdPlayerIdAndIdIdempotencyKey(black.getId(), idempotencyKey);
+        if (previous.isPresent()) {
+            if (!previous.get().getRequestFingerprint().equals(fingerprint)) {
+                throw new ApiException(HttpStatus.CONFLICT, "IDEMPOTENCY_KEY_REUSED", "This idempotency key was already used for a different request");
+            }
+            return readJson(previous.get().getResponseJson(), JoinGameResponse.class);
+        }
+
+        GameSessionEntity entity = findGameForUpdate(id);
+        if (black.getId().equals(entity.getWhitePlayerId())) {
+            throw new ApiException(HttpStatus.CONFLICT, "CANNOT_JOIN_OWN_GAME", "Use a different browser or device to join as the other player");
+        }
+        if (black.getId().equals(entity.getBlackPlayerId())) {
+            JoinGameResponse response = new JoinGameResponse(toResponse(entity, readState(entity)), null);
+            return response;
+        }
+        if (entity.getBlackPlayerId() != null || entity.getBlackPlayer() != null) {
+            throw new ApiException(HttpStatus.CONFLICT, "GAME_ALREADY_FULL", "The game already has two players");
+        }
+        entity.assignPlayers(entity.getWhitePlayerId(), black.getId());
+        entity.joinBlackPlayer(black.getNickname(), "", Instant.now());
+        entity = games.saveAndFlush(entity);
+        JoinGameResponse response = new JoinGameResponse(toResponse(entity, readState(entity)), null);
+        playerIdempotencyRecords.saveAndFlush(new PlayerIdempotencyRecordEntity(
+                black.getId(), idempotencyKey, fingerprint, writeJson(response), Instant.now()));
+        publishAfterCommit(id, response.game());
+        return response;
+    }
+
+    @Transactional(readOnly = true)
+    public RoomLookupResponse lookupRoom(String roomCode) {
+        GameSessionEntity entity = games.findByRoomCodeAndStatusIn(roomCode, List.of("WAITING_FOR_PLAYER", "IN_PROGRESS"))
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "GAME_NOT_FOUND", "No open game for this room code"));
+        return new RoomLookupResponse(entity.getId(), entity.getStatus(), entity.getWhitePlayer());
+    }
+
+    private String generateUniqueRoomCode() {
+        for (int attempt = 0; attempt < 5; attempt++) {
+            String candidate = roomCodes.generate();
+            if (games.findByRoomCodeAndStatusIn(candidate, List.of("WAITING_FOR_PLAYER", "IN_PROGRESS")).isEmpty()) {
+                return candidate;
+            }
+        }
+        throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "SERVICE_UNAVAILABLE", "Could not allocate a room code, try again");
     }
 
     @Transactional(readOnly = true)
