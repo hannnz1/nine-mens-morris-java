@@ -1,0 +1,6 @@
+admin
+administrator
+system
+moderator
+gm
+support
