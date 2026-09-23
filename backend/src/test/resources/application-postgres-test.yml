@@ -1,4 +1,4 @@
-# Explicitly run db/init.sql in a disposable database first; this profile only validates.
+# Flyway migrates this database on connection; Hibernate only validates.
 # The concurrency suite deletes its game rows.
 spring:
   datasource:
@@ -8,3 +8,7 @@ spring:
     driver-class-name: org.postgresql.Driver
     hikari:
       connection-init-sql: "SET lock_timeout = '5s'"
+  flyway:
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+    baseline-version: 1

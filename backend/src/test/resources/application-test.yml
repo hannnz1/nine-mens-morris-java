@@ -10,8 +10,8 @@ spring:
     open-in-view: false
     hibernate:
       ddl-auto: validate
-  # Only the disposable H2 test database is initialized by Spring Boot.
-  sql:
-    init:
-      mode: always
-      schema-locations: classpath:db/init.sql
+  # The disposable H2 test database is migrated by Flyway, same as production.
+  flyway:
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+    baseline-version: 1

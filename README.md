@@ -64,11 +64,11 @@
 | 并发控制 | 按棋局的悲观行锁、短事务、`@Version`、`expectedVersion` |
 | 实时通信 | 原生 WebSocket、小型 JSON 协议、REST 恢复快照 |
 | 前端 | HTML、CSS、原生 JavaScript、Fetch、Web Crypto、sessionStorage |
-| 数据库结构 | 单份 `init.sql`、显式初始化、Hibernate `validate` |
+| 数据库结构 | Flyway 版本化迁移、Hibernate `validate` |
 | 测试 | JUnit、Spring Boot 集成测试、H2、真实 PostgreSQL 并发测试、Node.js 前端状态测试 |
 | 部署与 CI | Docker Compose、Caddy（线上）、GitHub Actions |
 
-当前实现不依赖 STOMP、Flyway、Redis、消息队列或大型前端框架。桌面客户端仍保留，并与后端共享规则引擎。
+当前实现不依赖 STOMP、Redis、消息队列或大型前端框架。桌面客户端仍保留，并与后端共享规则引擎。
 
 ## 设计重点
 
@@ -117,7 +117,7 @@ flowchart LR
 game-engine/                         独立规则、棋盘拓扑与游戏状态
 backend/                             REST、事务、持久化及 WebSocket
   src/main/resources/static/         浏览器 HTML / CSS / JavaScript
-  src/main/resources/db/init.sql     单份数据库初始化 SQL
+  src/main/resources/db/migration/   Flyway 版本化迁移脚本
   src/test/frontend/                 前端会话与重试回归测试
 legacy-desktop/                      桌面版 Maven 构建模块
 Nine Man's Morris/                   桌面源代码及教程资源
@@ -145,7 +145,7 @@ Invoke-RestMethod http://localhost:8080/actuator/health
 
 Linux / macOS 将 `Copy-Item` 替换为 `cp`，健康检查可用 `curl http://localhost:8080/actuator/health`。启动成功后打开 **http://localhost:8080/**。
 
-空 PostgreSQL 数据目录首次启动时，由容器执行挂载的 `init.sql`。应用仅通过 Hibernate `validate` 校验结构，不自动建表或迁移。已有数据卷不会重新执行 SQL；不要通过删除数据卷更新应用。已有库调整见[数据库说明](docs/database-initialization.zh-CN.md)。
+空 PostgreSQL 数据目录首次启动时，应用启动时由 Flyway 自动执行迁移；不再需要挂载或手工执行 SQL 文件。已有库调整见[数据库说明](docs/database-initialization.zh-CN.md)。
 
 停止应用并保留数据：
 
@@ -155,10 +155,9 @@ docker compose down
 
 ### 方式二：Java + PostgreSQL
 
-需要 JDK 17、Maven 3.9+ 和 PostgreSQL 16。先自行创建数据库 `morris` 和对应角色，然后对**空库**执行一次初始化：
+需要 JDK 17、Maven 3.9+ 和 PostgreSQL 16。先自行创建数据库 `morris` 和对应角色；应用首次启动时会对空库自动执行 Flyway 迁移，无需手工执行 SQL：
 
 ```powershell
-psql -h localhost -U morris -d morris --set=ON_ERROR_STOP=1 --single-transaction --file=backend/src/main/resources/db/init.sql
 $env:DB_URL = 'jdbc:postgresql://localhost:5432/morris'
 $env:DB_USERNAME = 'morris'
 $env:DB_PASSWORD = 'your-password'
@@ -216,10 +215,9 @@ node --test backend/src/test/frontend/session.test.cjs
 
 ### 真实 PostgreSQL 并发测试
 
-先创建独立的 `morris_concurrency_test` 数据库和角色，首次对空库执行初始化，然后设置连接参数：
+先创建独立的 `morris_concurrency_test` 数据库和角色；测试连接空库时会自动执行 Flyway 迁移，然后设置连接参数：
 
 ```powershell
-psql -h localhost -U morris_test -d morris_concurrency_test --set=ON_ERROR_STOP=1 --single-transaction --file=backend/src/main/resources/db/init.sql
 $env:PG_TEST_URL = 'jdbc:postgresql://localhost:5432/morris_concurrency_test'
 $env:PG_TEST_USERNAME = 'morris_test'
 $env:PG_TEST_PASSWORD = 'your-test-password'

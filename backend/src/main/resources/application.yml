@@ -24,10 +24,10 @@ spring:
       hibernate:
         jdbc:
           time_zone: UTC
-  # Initialize a new database explicitly with db/init.sql before starting this app.
-  sql:
-    init:
-      mode: never
+  flyway:
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+    baseline-version: 1
   lifecycle:
     timeout-per-shutdown-phase: 20s
 

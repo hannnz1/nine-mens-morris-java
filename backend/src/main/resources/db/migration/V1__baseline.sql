@@ -1,7 +1,5 @@
--- Final schema for a NEW, EMPTY database. This is not an upgrade script.
--- PostgreSQL: psql ... --set=ON_ERROR_STOP=1 --single-transaction --file=init.sql
--- Intentionally fail if tables already exist; do not hide a mismatched schema.
--- This same file is used by PostgreSQL, Docker initialization and H2 tests.
+-- V1 baseline: this is the schema every database on M1 or earlier already has.
+-- Existing databases attach here via baselineOnMigrate + baselineVersion=1; they do not re-run this file.
 
 CREATE TABLE game_sessions (
     id UUID PRIMARY KEY,
@@ -16,7 +14,6 @@ CREATE TABLE game_sessions (
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL
 );
 
-
 CREATE TABLE idempotency_records (
     id UUID PRIMARY KEY,
     game_id UUID NOT NULL REFERENCES game_sessions(id) ON DELETE CASCADE,
@@ -26,4 +23,3 @@ CREATE TABLE idempotency_records (
     created_at TIMESTAMP WITH TIME ZONE NOT NULL,
     CONSTRAINT uk_idempotency_game_key UNIQUE (game_id, idempotency_key)
 );
-

@@ -43,13 +43,6 @@ jobs:
           java-version: '17'
           cache: maven
 
-      - name: Initialize PostgreSQL test schema
-        run: >-
-          docker exec -i "${{ job.services.postgres.id }}"
-          psql -U morris_test -d morris_concurrency_test
-          --set=ON_ERROR_STOP=1 --single-transaction
-          < backend/src/main/resources/db/init.sql
-
       - name: Set up Node for browser state tests
         uses: actions/setup-node@v4
         with:
