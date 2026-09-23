@@ -22,7 +22,9 @@ function harness() {
         emit(type,event={}){if(type==='open')this.readyState=1;if(type==='close')this.readyState=3;for(const fn of this.events[type]||[])fn(event);}
         close(){this.emit('close',{code:1000});}
     }
+    const identityStore = new Map();
     const ctx=vm.createContext({document,sessionStorage:{getItem:k=>storage.get(k)||null,setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},
+        localStorage:{getItem:k=>identityStore.get(k)||null,setItem:(k,v)=>identityStore.set(k,v),removeItem:k=>identityStore.delete(k)},
         window:{location:{search:'',pathname:'/',protocol:'http:',host:'localhost',href:'http://localhost/'},crypto:webcrypto,confirm:()=>true,addEventListener(){}},
         history:{replaceState(){}},URL,URLSearchParams,Uint8Array,AbortController,btoa,console,WebSocket:FakeSocket,
         setTimeout:(fn,ms)=>{const id=++timerId;timers.set(id,{fn,ms});return id;},clearTimeout:id=>timers.delete(id),fetch:async()=>response(game())});
@@ -191,4 +193,23 @@ test('latest change marker uses adjacent versions and ignores stale snapshots',(
     h.run('applyGame(next,"REST")');assert.equal(h.run('client.lastChanged.join()'),'A1');
     h.ctx.next=game(A,1);h.run('applyGame(next,"REST")');assert.equal(h.run('client.lastChanged.join()'),'A1');
     h.ctx.next=game(A,5);h.run('applyGame(next,"REST")');assert.equal(h.run('client.lastChanged.length'),0);
+});
+
+test('saveIdentity persists to localStorage and loadIdentity reads it back',()=>{
+    const h=harness();const store={};
+    h.ctx.localStorage={getItem:k=>(k in store?store[k]:null),setItem:(k,v)=>{store[k]=v;},removeItem:k=>{delete store[k];}};
+    h.ctx.identity={playerId:'p1',nickname:'Han',clientToken:'x'.repeat(43)};
+    h.run('saveIdentity(identity)');
+    // Compared via the raw persisted JSON (not the vm-realm object returned by loadIdentity itself,
+    // whose plain-object prototype lives in a different vm context/realm than this test's own
+    // literals, which would make assert.deepStrictEqual's prototype check fail spuriously).
+    assert.deepStrictEqual(JSON.parse(store['morris.player.v1']),{playerId:'p1',nickname:'Han',clientToken:'x'.repeat(43)});
+    const loaded=h.run('loadIdentity()');
+    assert.equal(loaded.playerId,'p1');assert.equal(loaded.nickname,'Han');assert.equal(loaded.clientToken,'x'.repeat(43));
+});
+
+test('loadIdentity returns null and does not throw when localStorage access throws',()=>{
+    const h=harness();
+    h.ctx.localStorage={getItem:()=>{throw new Error('SecurityError');}};
+    assert.strictEqual(h.run('loadIdentity()'),null);
 });

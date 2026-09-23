@@ -209,6 +209,13 @@ input:focus { border-color: var(--green-bright); box-shadow: 0 0 0 3px rgba(84,1
 .recovery-card p { font-size: 13px; line-height: 1.7; }
 .recovery-card .text-button { margin-top: 16px; font-size: 12px; }
 .recovery-card .button { width: 100%; justify-content: center; }
+.recovery-card label { margin-top: 8px; }
+
+.my-games-list { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 8px; }
+.my-games-list li { border: 1px solid var(--line); border-radius: 8px; background: rgba(255,255,255,.5); }
+.my-games-list a { display: flex; justify-content: space-between; gap: 8px; padding: 10px 14px; color: inherit; text-decoration: none; font-size: 13px; }
+.my-games-list a:hover { background: rgba(35,102,83,.08); }
+.my-games-list:empty::after { content: "暂无进行中的对局"; display: block; padding: 4px 2px; color: var(--muted); font-size: 12px; }
 .rules-panel { padding: 22px 26px; margin-top: 28px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
 summary { cursor: pointer; font-weight: 650; }
 .rules-panel ol { padding-left: 24px; line-height: 1.9; color: #4d5954; font-size: 14px; }

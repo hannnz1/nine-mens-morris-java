@@ -17,7 +17,47 @@ const COORDINATES = {
 };
 
 const STORAGE_KEY = "morris-live-session-v1";
+const IDENTITY_STORAGE_KEY = "morris.player.v1";
 const MAX_LOG_ITEMS = 8;
+
+let inMemoryIdentity = null;
+let identityStorageWarned = false;
+
+function warnIdentityStorageOnce(message, error) {
+    console.warn(message, error);
+    if (!identityStorageWarned) {
+        identityStorageWarned = true;
+        try { showToast("无法保存本地身份，本标签页关闭后需重新加入。"); } catch { /* toast not ready yet */ }
+    }
+}
+
+function saveIdentity(identity) {
+    inMemoryIdentity = identity;
+    try {
+        localStorage.setItem(IDENTITY_STORAGE_KEY, JSON.stringify(identity));
+    } catch (error) {
+        warnIdentityStorageOnce("Could not persist player identity; it will not survive closing this tab.", error);
+    }
+}
+
+function loadIdentity() {
+    try {
+        const raw = localStorage.getItem(IDENTITY_STORAGE_KEY);
+        return raw ? JSON.parse(raw) : null;
+    } catch (error) {
+        warnIdentityStorageOnce("Could not read player identity from storage (private browsing?).", error);
+        return inMemoryIdentity;
+    }
+}
+
+function clearIdentity() {
+    inMemoryIdentity = null;
+    try {
+        localStorage.removeItem(IDENTITY_STORAGE_KEY);
+    } catch (error) {
+        console.warn("Could not clear stored player identity.", error);
+    }
+}
 
 const elements = {
     setupPanel: document.getElementById("setupPanel"),
@@ -42,7 +82,12 @@ const elements = {
     blackPieces: document.getElementById("blackPieces"),
     refreshGame: document.getElementById("refreshGame"),
     activityLog: document.getElementById("activityLog"),
-    toast: document.getElementById("toast")
+    toast: document.getElementById("toast"),
+    roomCodeText: document.getElementById("roomCodeText"),
+    copyRoomCode: document.getElementById("copyRoomCode"),
+    myGamesList: document.getElementById("my-games-list"),
+    roomCodeInput: document.getElementById("roomCodeInput"),
+    roomCodeJoinButton: document.getElementById("roomCodeJoinButton")
 };
 
 const client = {
@@ -62,13 +107,18 @@ const client = {
     selectedSource: null,
     pendingAction: false,
     lastChanged: [],
-    logs: []
+    logs: [],
+    identity: null,
+    roomCode: null
 };
 
 initializeBoard();
 bindEvents();
 prefillSharedGame();
 restoreSession();
+// Bound to the real "load" event only; the Node test harness's window.addEventListener stub is a
+// no-op, so this network-touching bootstrap never runs inside the frontend unit test sandbox.
+window.addEventListener("load", ensureIdentity);
 
 function initializeBoard() {
     for (const position of POSITIONS) {
@@ -94,6 +144,8 @@ function bindEvents() {
     document.getElementById("clearSession").addEventListener("click", clearSession);
     document.getElementById("retryAction").addEventListener("click", retryAction);
     elements.refreshGame.addEventListener("click", () => refreshGame("手动刷新"));
+    elements.copyRoomCode.addEventListener("click", copyRoomCode);
+    elements.roomCodeJoinButton.addEventListener("click", lookupRoomCode);
 }
 
 function prefillSharedGame() {
@@ -125,6 +177,7 @@ async function restoreSession() {
     client.session = saved.session || null;
     client.pendingJoin = saved.pendingJoin || null;
     client.pendingAction = saved.pendingAction || null;
+    client.roomCode = saved.roomCode || null;
     client.epoch++;
     client.game = null;
     if (client.pendingJoin) return resumeJoin();
@@ -136,7 +189,7 @@ async function restoreSession() {
     entryBusy(true);
     try {
         const game = await api(`/api/v1/games/${ctx.gameId}/session`, {
-            headers: { "X-Player-Token": client.session.token }
+            headers: credentialHeaders()
         });
         if (!matches(ctx)) return;
         enterGame(game, "已恢复当前标签页的玩家身份");
@@ -170,12 +223,21 @@ async function createGame(event) {
     const ctx = context();
     entryBusy(true);
     try {
-        const response = await api("/api/v1/games", { method: "POST", body: { whitePlayer: playerName } });
+        const options = client.identity
+            ? { method: "POST", headers: { ...authHeader(client.identity.clientToken), "Idempotency-Key": randomToken() } }
+            : { method: "POST", body: { whitePlayer: playerName } };
+        const response = await api("/api/v1/games", options);
         if (!matches(ctx)) return;
-        client.session = { gameId: response.game.id, token: response.whiteCredential.token,
-            side: "WHITE", playerName: response.whiteCredential.playerName };
+        // A Bearer-authenticated create never returns a whiteCredential (the player's own bearer
+        // token already authenticates every later request for this game); only the legacy
+        // anonymous branch mints one.
+        client.session = client.identity
+            ? { gameId: response.game.id, token: client.identity.clientToken, side: "WHITE", playerName: client.identity.nickname, bearer: true }
+            : { gameId: response.game.id, token: response.whiteCredential.token, side: "WHITE", playerName: response.whiteCredential.playerName };
+        client.roomCode = response.roomCode || null;
         saveSession();
         enterGame(response.game, "白方已创建对局，复制邀请链接邀请黑方加入");
+        if (client.identity) void renderMyGames();
     } catch (error) { if (ctx.epoch === client.epoch) showToast(readableError(error)); }
     finally { if (ctx.epoch === client.epoch) entryBusy(false); }
 }
@@ -208,6 +270,7 @@ async function resumeJoin() {
         client.session = { gameId: response.game.id, token: pending.joinToken,
             side: "BLACK", playerName: response.credential.playerName };
         client.pendingJoin = null;
+        client.roomCode = null;
         saveSession();
         enterGame(response.game, "黑方席位已确认，已恢复最新状态");
     } catch (error) {
@@ -225,6 +288,7 @@ function clearSession() {
     client.session = null;
     client.pendingJoin = null;
     client.pendingAction = null;
+    client.roomCode = null;
     showSetup();
     setConnection("offline", "尚未进入对局");
     showToast("保存的身份已明确清除");
@@ -240,6 +304,8 @@ function enterGame(game, message) {
     elements.gamePanel.classList.remove("is-preview");
     elements.copyGameId.disabled = false;
     elements.refreshGame.disabled = false;
+    elements.roomCodeText.textContent = client.roomCode || "仅创建对局时可见";
+    elements.copyRoomCode.disabled = !client.roomCode;
     client.logs = [];
     addLog(message);
     applyGame(game, "REST");
@@ -272,7 +338,7 @@ async function refreshGame(reason = "状态刷新") {
     const ctx = context();
     try {
         const game = await api(`/api/v1/games/${ctx.gameId}/session`, {
-            headers: { "X-Player-Token": client.session.token }
+            headers: credentialHeaders()
         });
         if (!matches(ctx) || !client.active) return;
         applyGame(game, "REST");
@@ -343,7 +409,6 @@ async function retryAction() {
     const pending = client.pendingAction;
     if (!pending || client.retryBusy || !client.active || pending.gameId !== client.session?.gameId) return;
     const ctx = context();
-    const token = client.session.token;
     client.retryBusy = true;
     renderGame();
     try {
@@ -351,7 +416,7 @@ async function retryAction() {
             if (!matches(ctx) || !client.active) return;
             try {
                 const game = await api(`/api/v1/games/${pending.gameId}/actions`, {
-                    method: "POST", headers: { "X-Player-Token": token, "Idempotency-Key": pending.key }, body: pending.body
+                    method: "POST", headers: { ...credentialHeaders(), "Idempotency-Key": pending.key }, body: pending.body
                 });
                 if (!matches(ctx)) return;
                 client.pendingAction = null;
@@ -625,7 +690,7 @@ function setFormBusy(form, busy) {
 
 function saveSession() {
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ session: client.session,
-        pendingJoin: client.pendingJoin, pendingAction: client.pendingAction }));
+        pendingJoin: client.pendingJoin, pendingAction: client.pendingAction, roomCode: client.roomCode }));
 }
 
 function setSharedGameInUrl(gameId) {
@@ -647,6 +712,133 @@ async function copyGameId() {
         if (matches(ctx) && client.active) showToast("邀请链接已复制，发给朋友即可加入");
     } catch {
         if (matches(ctx) && client.active) { field.focus(); field.select(); showToast("请复制已选中的邀请链接"); }
+    }
+}
+
+function authHeader(token) {
+    return { Authorization: `Bearer ${token}` };
+}
+
+function credentialHeaders() {
+    return client.session?.bearer ? authHeader(client.session.token) : { "X-Player-Token": client.session.token };
+}
+
+async function ensureIdentity() {
+    client.identity = loadIdentity();
+    if (client.identity) {
+        try {
+            const me = await api("/api/v1/players/me", { headers: authHeader(client.identity.clientToken) });
+            client.identity = { playerId: me.playerId, nickname: me.nickname, clientToken: client.identity.clientToken };
+            saveIdentity(client.identity);
+        } catch (error) {
+            if (error.status === 401) {
+                // 身份已失效：按规范清除保存的身份，随后回落到创建新身份。
+                clearIdentity();
+                client.identity = null;
+            } else {
+                // Offline or transient failure: keep the identity we already have rather than
+                // silently discarding it, and skip the my-games refresh until it works again.
+                if (client.identity) void renderMyGames();
+                return;
+            }
+        }
+    }
+    if (!client.identity) {
+        const nameField = elements.createForm.elements.whitePlayer;
+        const nickname = (nameField?.value || "").trim() || `玩家${Math.floor(Math.random() * 10000)}`;
+        const clientToken = randomToken();
+        try {
+            const created = await api("/api/v1/players", { method: "POST", body: { nickname, clientToken } });
+            client.identity = { playerId: created.playerId, nickname: created.nickname, clientToken };
+            saveIdentity(client.identity);
+        } catch (error) {
+            showToast("无法创建玩家身份，我的对局暂不可用：" + readableError(error));
+            return;
+        }
+    }
+    const createNameField = elements.createForm.elements.whitePlayer;
+    if (createNameField) createNameField.value = client.identity.nickname;
+    const joinNameField = elements.joinForm.elements.blackPlayer;
+    if (joinNameField) joinNameField.value = client.identity.nickname;
+    void renderMyGames();
+}
+
+async function renderMyGames() {
+    if (!client.identity || !elements.myGamesList) return;
+    try {
+        const result = await api("/api/v1/players/me/games?status=ACTIVE", { headers: authHeader(client.identity.clientToken) });
+        elements.myGamesList.replaceChildren();
+        for (const summary of result.games || []) {
+            const item = document.createElement("li");
+            const link = document.createElement("a");
+            link.href = `?game=${summary.gameId}`;
+            link.textContent = `${summary.opponentNickname || "等待对手"} · ${gameStatusLabel(summary.status)}`;
+            link.addEventListener("click", event => {
+                event.preventDefault();
+                void enterMyGame(summary.gameId);
+            });
+            item.appendChild(link);
+            elements.myGamesList.appendChild(item);
+        }
+    } catch (error) {
+        console.warn("Could not load my-games list.", error);
+    }
+}
+
+function gameStatusLabel(status) {
+    return ({ WAITING_FOR_PLAYER: "等待对手", IN_PROGRESS: "进行中" })[status] || status;
+}
+
+async function enterMyGame(gameId) {
+    if (!client.identity || client.entryBusy) return;
+    if (client.active) leaveGame();
+    client.epoch++;
+    client.game = null;
+    const ctx = context();
+    entryBusy(true);
+    try {
+        const game = await api(`/api/v1/games/${gameId}/session`, { headers: authHeader(client.identity.clientToken) });
+        if (!matches(ctx)) return;
+        client.session = { gameId: game.id, token: client.identity.clientToken,
+            side: mySide(game), playerName: client.identity.nickname, bearer: true };
+        client.roomCode = null;
+        saveSession();
+        enterGame(game, "已通过身份打开对局");
+    } catch (error) {
+        if (matches(ctx)) showToast(readableError(error));
+    } finally {
+        if (matches(ctx)) entryBusy(false);
+    }
+}
+
+function mySide(game) {
+    return game.whitePlayer === client.identity.nickname ? "WHITE" : "BLACK";
+}
+
+async function lookupRoomCode() {
+    const code = elements.roomCodeInput.value.trim();
+    if (!/^\d{6}$/.test(code)) {
+        showToast("请输入 6 位房间码");
+        return;
+    }
+    try {
+        const room = await api(`/api/v1/rooms/${code}`);
+        elements.joinGameId.value = room.gameId;
+        showToast("已找到对局，请输入姓名后点击加入对局");
+        const joinNameField = elements.joinForm.elements.blackPlayer;
+        if (joinNameField) joinNameField.focus();
+    } catch (error) {
+        showToast(readableError(error));
+    }
+}
+
+async function copyRoomCode() {
+    if (!client.roomCode) return;
+    try {
+        await navigator.clipboard.writeText(client.roomCode);
+        showToast("房间码已复制，发给朋友即可加入");
+    } catch {
+        showToast(`房间码：${client.roomCode}`);
     }
 }
 

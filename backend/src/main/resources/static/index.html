@@ -78,6 +78,22 @@
                 </label>
                 <button class="button button-outline" type="submit">加入对局 <span>→</span></button>
             </form>
+
+            <div class="recovery-card" id="roomJoinCard">
+                <h2>输入房间码加入</h2>
+                <p>房间码是一串 6 位数字，由创建对局的一方分享给你。</p>
+                <label>
+                    <span>房间码</span>
+                    <input id="roomCodeInput" name="roomCode" maxlength="6" inputmode="numeric" pattern="\d{6}" placeholder="123456">
+                </label>
+                <button class="button button-outline" id="roomCodeJoinButton" type="button">查找对局</button>
+            </div>
+
+            <div class="recovery-card" id="myGamesCard">
+                <h2>我的对局</h2>
+                <p>与当前保存的身份关联的进行中对局，点击可直接打开。</p>
+                <ul class="my-games-list" id="my-games-list" aria-live="polite"></ul>
+            </div>
         </div>
     </section>
 
@@ -98,6 +114,11 @@
                 <code id="gameIdText">创建对局后显示</code>
                 <button class="text-button" id="copyGameId" type="button" disabled>复制邀请链接</button>
                 <input id="inviteLink" class="invite-link" aria-label="邀请链接，可选择复制" readonly hidden>
+            </div>
+            <div class="game-id-block">
+                <span>房间码</span>
+                <code id="roomCodeText">仅创建对局时可见</code>
+                <button class="text-button" id="copyRoomCode" type="button" disabled>复制房间码</button>
             </div>
             <p class="operation-notice" id="operationNotice" role="status" hidden></p>
             <button class="button button-outline" id="retryAction" type="button" hidden>重试未确认操作</button>
