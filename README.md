@@ -65,7 +65,7 @@
 | 实时通信 | 原生 WebSocket、小型 JSON 协议、REST 恢复快照 |
 | 前端 | HTML、CSS、原生 JavaScript、Fetch、Web Crypto、sessionStorage |
 | 数据库结构 | Flyway 版本化迁移、Hibernate `validate` |
-| 测试 | JUnit、Spring Boot 集成测试、H2、真实 PostgreSQL 并发测试、Node.js 前端状态测试 |
+| 测试 | JUnit、Spring Boot 集成测试、H2、Testcontainers（集成测试用真实 PostgreSQL 容器）、Node.js 前端状态测试 |
 | 部署与 CI | Docker Compose、Caddy（线上）、GitHub Actions |
 
 当前实现不依赖 STOMP、Redis、消息队列或大型前端框架。桌面客户端仍保留，并与后端共享规则引擎。
@@ -171,14 +171,21 @@ java -jar .\backend\target\backend-1.0.0-SNAPSHOT.jar
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `POST` | `/api/v1/games` | 创建白方等待局，返回白方凭证 |
-| `POST` | `/api/v1/games/{id}/join` | 以随机加入凭证申请或恢复黑方席位 |
+| `POST` | `/api/v1/players` | 以客户端生成的 `clientToken` 创建或恢复持久玩家身份 |
+| `GET` | `/api/v1/players/me` | 使用 `Authorization: Bearer` 读取当前玩家信息 |
+| `PATCH` | `/api/v1/players/me` | 使用 `Authorization: Bearer` 修改昵称 |
+| `GET` | `/api/v1/players/me/games` | 使用 `Authorization: Bearer` 分页读取当前玩家的历史/进行中对局 |
+| `GET` | `/api/v1/rooms/{roomCode}` | 按 6 位房间号查询对局，无需身份凭证 |
+| `POST` | `/api/v1/games` | 创建白方等待局；携带 `Authorization: Bearer` 及 `Idempotency-Key` 时按持久身份创建，否则回退到创建匿名白方凭证的旧流程 |
+| `POST` | `/api/v1/games/{id}/join` | 申请或恢复黑方席位；携带 `Authorization: Bearer` 及 `Idempotency-Key` 时按持久身份加入，否则回退到 `joinToken` 匿名加入的旧流程 |
 | `GET` | `/api/v1/games/{id}` | 读取公开棋局状态，不含凭证 |
-| `GET` | `/api/v1/games/{id}/session` | 使用 `X-Player-Token` 校验身份并读取快照 |
-| `POST` | `/api/v1/games/{id}/actions` | 使用玩家凭证、幂等键和版本提交操作 |
+| `GET` | `/api/v1/games/{id}/session` | 使用 `Authorization: Bearer` 或 `X-Player-Token` 校验身份并读取快照 |
+| `POST` | `/api/v1/games/{id}/actions` | 使用 `Authorization: Bearer` 或 `X-Player-Token`、幂等键和版本提交操作 |
 | WebSocket | `/ws` | 鉴权后接收状态，不执行落子操作 |
 
-创建请求为 `{"whitePlayer":"Alice"}`。加入请求包含 `blackPlayer` 和 `joinToken`；`joinToken` 应为密码学随机的 32 字节、URL-safe Base64 无填充字符串（43 字符），发送前持久保存。
+`POST /api/v1/games` 与 `POST /api/v1/games/{id}/join` 现在优先通过 `Authorization: Bearer <clientToken>` 鉴权持久身份，这是新客户端的主要方式；未携带 `Authorization` 头时回退到创建前已存在的匿名流程（`X-Player-Token` / `joinToken`），仅供在此变更之前创建的对局继续使用。
+
+匿名创建请求为 `{"whitePlayer":"Alice"}`。匿名加入请求包含 `blackPlayer` 和 `joinToken`；`joinToken` 应为密码学随机的 32 字节、URL-safe Base64 无填充字符串（43 字符），发送前持久保存。`clientToken` 采用相同格式，由客户端生成并保存，服务端只存储其哈希；持久身份下的创建与加入还需携带 `Idempotency-Key` 请求头。
 
 操作请求示例：
 
@@ -242,10 +249,11 @@ node scripts/verify-realtime.cjs
 
 - 面向单实例部署，WebSocket 连接保存在进程内，暂不支持跨实例消息分发。
 - 推送不是持久化消息；快照恢复当前状态，不保证每条中间通知都能送达，也不宣称端到端“恰好一次”。
-- 无完整账号体系、跨设备身份恢复、对手在线状态、匹配系统或排行榜。
+- 持久身份凭证（`clientToken`）现在保存在 `localStorage` 中，跨标签页和关闭重开仍可恢复；但浏览器站点数据被清除、且用户没有另外保存恢复码时，身份仍会永久丢失。没有跨设备身份恢复、对手在线状态、匹配系统或排行榜。
+- 创建前已存在对局所依赖的 `X-Player-Token` 匿名路径计划在本次上线 30 天后移除，前提是届时不再有依赖该路径的进行中对局。
 - 创建白方成功但响应丢失时，可能留下无人继续的等待局；安全重试目前重点覆盖加入和游戏操作。
 - 幂等记录没有自动过期清理，适用于演示规模；清理历史记录会缩短可重放范围。
-- 表结构稳定，采用单份初始化 SQL 和显式人工调整；如果未来需要长期维护多个数据库版本，再评估迁移工具。
+- 数据库结构变更通过 Flyway 版本化迁移管理；如果未来需要长期维护多个数据库版本，再评估更复杂的迁移策略。
 
 ## 桌面客户端
 
