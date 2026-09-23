@@ -134,6 +134,15 @@ class GameApiIntegrationTest extends PostgresIntegrationTest {
     }
 
     @Test
+    void rejectsAMissingPlayerCredentialAsAuthRequired() throws Exception {
+        CreatedGame created = createGame();
+
+        mockMvc.perform(get("/api/v1/games/{id}/session", created.id()))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.code").value("AUTH_REQUIRED"));
+    }
+
+    @Test
     void mapsIllegalGameActionsToAStableApiError() throws Exception {
         CreatedGame created = createGame();
         submit(created, created.whiteToken(), "white-a1",

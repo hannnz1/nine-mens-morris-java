@@ -28,17 +28,19 @@ public class SeatResolver {
      * @param bearerToken     the {@code Authorization: Bearer} credential, or null if absent
      * @param legacySeatToken the {@code X-Player-Token} credential, or null if absent
      */
+    private static final int MAX_TOKEN_LENGTH = 128;
+
     public Player resolve(GameSessionEntity game, String bearerToken, String legacySeatToken) {
         if (isBlank(bearerToken) && isBlank(legacySeatToken)) {
             throw new ApiException(HttpStatus.UNAUTHORIZED, "AUTH_REQUIRED", "A player credential is required");
         }
-        if (!isBlank(bearerToken)) {
+        if (usable(bearerToken)) {
             Player bySeat = matchPlayerId(game, tokens.hash(bearerToken));
             if (bySeat != null) {
                 return bySeat;
             }
         }
-        if (!isBlank(legacySeatToken)) {
+        if (usable(legacySeatToken)) {
             Player byLegacy = matchLegacyHash(game, legacySeatToken);
             if (byLegacy != null) {
                 return byLegacy;
@@ -76,7 +78,16 @@ public class SeatResolver {
         return null;
     }
 
-    private boolean isBlank(String value) {
+    // Package-private (not private) so GameSessionService can select the same credential for its
+    // idempotency fingerprint that this method actually authenticates against.
+    static boolean isBlank(String value) {
         return value == null || value.isBlank();
+    }
+
+    // A present credential is only worth hashing/looking up if it's within the size a real token
+    // can be; this avoids hashing arbitrarily large header values (same cap the old, now-removed
+    // GameSessionService.validatePlayerToken enforced).
+    private boolean usable(String value) {
+        return !isBlank(value) && value.length() <= MAX_TOKEN_LENGTH;
     }
 }

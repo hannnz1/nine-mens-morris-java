@@ -117,7 +117,10 @@ public class GameSessionService {
     public GameResponse performAction(UUID id, String bearerToken, String legacySeatToken, String idempotencyKey,
                                       ActionRequest request) {
         validateIdempotencyKey(idempotencyKey);
-        String credential = bearerToken != null ? bearerToken : legacySeatToken;
+        // Mirrors SeatResolver.resolve's own blank-vs-non-blank credential selection (not a bare
+        // != null check) so the idempotency fingerprint is hashed from the same credential slot
+        // SeatResolver tries first, rather than potentially a blank Authorization header.
+        String credential = SeatResolver.isBlank(bearerToken) ? legacySeatToken : bearerToken;
         String fingerprint = tokens.hash(credential + ":" + writeJson(request));
 
         GameSessionEntity entity = findGameForUpdate(id);
