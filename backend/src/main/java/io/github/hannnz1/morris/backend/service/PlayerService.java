@@ -10,14 +10,17 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 @Service
 public class PlayerService {
@@ -50,7 +53,10 @@ public class PlayerService {
                 });
     }
 
-    @Transactional(readOnly = true)
+    // Not readOnly: this delegates to requirePlayer, which may persist a lastSeenAt touch, and a
+    // readOnly transaction here would leave Hibernate's flush mode as MANUAL and silently drop that
+    // write (self-invocation of requirePlayer also bypasses its own @Transactional).
+    @Transactional
     public PlayerResponse getByToken(String bearerToken) {
         return toResponse(requirePlayer(bearerToken));
     }
@@ -62,6 +68,8 @@ public class PlayerService {
         return toResponse(player);
     }
 
+    // @Transactional only takes effect when called through the Spring proxy (i.e. by another bean);
+    // calls from within this class (e.g. from getByToken/rename) run in the caller's own transaction.
     @Transactional
     public PlayerEntity requirePlayer(String bearerToken) {
         if (bearerToken == null || bearerToken.isBlank()) {
@@ -82,7 +90,7 @@ public class PlayerService {
             throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED",
                     "Nickname must be 1-16 characters with no control characters");
         }
-        if (blockedNicknames.contains(nickname.toLowerCase(java.util.Locale.ROOT))) {
+        if (blockedNicknames.contains(nickname.toLowerCase(Locale.ROOT))) {
             throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY, "NICKNAME_NOT_ALLOWED",
                     "This nickname is not allowed");
         }
@@ -94,9 +102,9 @@ public class PlayerService {
     }
 
     private Set<String> loadBlockedNicknames() {
-        try {
-            return Set.copyOf(Files.readAllLines(
-                    new ClassPathResource("blocked-nicknames.txt").getFile().toPath(), StandardCharsets.UTF_8));
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+                new ClassPathResource("blocked-nicknames.txt").getInputStream(), StandardCharsets.UTF_8))) {
+            return Set.copyOf(reader.lines().collect(Collectors.toSet()));
         } catch (IOException exception) {
             throw new UncheckedIOException("Could not load blocked-nicknames.txt", exception);
         }

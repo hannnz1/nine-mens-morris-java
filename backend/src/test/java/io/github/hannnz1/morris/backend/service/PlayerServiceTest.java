@@ -30,7 +30,8 @@ class PlayerServiceTest extends io.github.hannnz1.morris.backend.support.Postgre
         var second = playerService.createOrGet(new CreatePlayerRequest("Han", token));
 
         assertThat(second.playerId()).isEqualTo(first.playerId());
-        assertThat(players.count()).isEqualTo(1);
+        assertThat(players.findByTokenHash(tokens.hash(token)))
+                .hasValueSatisfying(entity -> assertThat(entity.getId()).isEqualTo(first.playerId()));
     }
 
     @Test
