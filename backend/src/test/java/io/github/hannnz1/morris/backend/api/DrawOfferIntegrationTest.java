@@ -119,6 +119,31 @@ class DrawOfferIntegrationTest extends PostgresIntegrationTest {
     }
 
     @Test
+    void theOfferersOwnLaterMoveClearsTheirOwnPendingOffer() {
+        // The other direction of "a move clears a pending offer" from
+        // aMoveByEitherPlayerClearsTheOtherPlayersPendingOffer above: there the OPPONENT's move
+        // clears the offer; here the OFFERER's own subsequent move must clear it too, per the
+        // plan's Review Focus. OFFER isn't turn-gated, so White can offer on White's own turn and
+        // then simply play their own move.
+        var white = createPlayer("Han");
+        var black = createPlayer("Zhu");
+        var game = createAndJoinGame(white, black);
+
+        var offered = draw(game.id(), white.token(), "OFFER");
+        assertThat(offered.getBody().get("drawOfferedBy")).isEqualTo("WHITE");
+
+        performMove(game.id(), white.token(), "A1"); // White's own move, not Black's
+
+        var afterMove = rest.exchange(url("/api/v1/games/" + game.id()), HttpMethod.GET,
+                new HttpEntity<>(new HttpHeaders()), Map.class);
+        assertThat(afterMove.getBody().get("drawOfferedBy")).isNull();
+
+        var acceptAfterMove = draw(game.id(), black.token(), "ACCEPT");
+        assertThat(acceptAfterMove.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(acceptAfterMove.getBody().get("code")).isEqualTo("NO_PENDING_OFFER");
+    }
+
+    @Test
     void offerAddsDrawOfferedByToTheResponse() {
         var white = createPlayer("Han");
         var black = createPlayer("Zhu");
