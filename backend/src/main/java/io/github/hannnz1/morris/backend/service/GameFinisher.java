@@ -75,7 +75,8 @@ public class GameFinisher {
                 entity.getBlackPlayer(), entity.getStatus(), state.phase(), state,
                 List.copyOf(engine.legalPlacements()), legalMoves, List.copyOf(engine.removablePieces()),
                 entity.getCreatedAt(), entity.getUpdatedAt(), clockView(entity),
-                entity.getDrawOfferedBy(), resultView(entity));
+                entity.getDrawOfferedBy(), resultView(entity),
+                entity.getRematchOfferedBy(), entity.getRematchGameId());
     }
 
     private ResultView resultView(GameSessionEntity entity) {

@@ -266,6 +266,24 @@ public class GameSessionEntity {
         return rematchGameId;
     }
 
+    public boolean hasPendingRematchOfferFrom(String side) {
+        return side.equals(rematchOfferedBy);
+    }
+
+    public void offerRematch(String side, Instant now) {
+        this.rematchOfferedBy = side;
+        this.updatedAt = now;
+    }
+
+    // Links the newly created rematch game onto the original once it exists, so any further
+    // /rematch call against the original replays this id idempotently (spec M2.6). Deliberately
+    // does not touch rematchOfferedBy - the pending offer is left as-is (both OFFER and ACCEPT
+    // reach this without needing to clear it, since the original game is now finished either way).
+    public void linkRematchGame(UUID rematchGameId, Instant now) {
+        this.rematchGameId = rematchGameId;
+        this.updatedAt = now;
+    }
+
     public Instant getFinishedAt() {
         return finishedAt;
     }

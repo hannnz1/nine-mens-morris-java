@@ -166,6 +166,14 @@ public class GameController {
         return gameSessions.offerDraw(id, bearerToken(authorization), idempotencyKey, request.action());
     }
 
+    @PostMapping("/{id}/rematch")
+    public GameResponse rematch(@PathVariable("id") UUID id,
+                                @RequestHeader(value = "Authorization", required = false) String authorization,
+                                @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+                                @Valid @RequestBody DrawActionRequest request) {
+        return gameSessions.offerRematch(id, bearerToken(authorization), idempotencyKey, request.action());
+    }
+
     private String bearerToken(String authorizationHeader) {
         return (authorizationHeader != null && authorizationHeader.startsWith("Bearer "))
                 ? authorizationHeader.substring("Bearer ".length())

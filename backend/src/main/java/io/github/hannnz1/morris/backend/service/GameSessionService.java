@@ -22,6 +22,7 @@ import io.github.hannnz1.morris.backend.persistence.IdempotencyRecordRepository;
 import io.github.hannnz1.morris.backend.persistence.PlayerEntity;
 import io.github.hannnz1.morris.backend.persistence.PlayerIdempotencyRecordEntity;
 import io.github.hannnz1.morris.backend.persistence.PlayerIdempotencyRecordRepository;
+import io.github.hannnz1.morris.backend.persistence.PlayerRepository;
 import io.github.hannnz1.morris.engine.BoardPosition;
 import io.github.hannnz1.morris.engine.GameAction;
 import io.github.hannnz1.morris.engine.GameEngine;
@@ -62,6 +63,7 @@ public class GameSessionService {
     private final RateLimiter rateLimiter;
     private final Clock clock;
     private final GameFinisher finisher;
+    private final PlayerRepository playerRepository;
 
     public GameSessionService(GameSessionRepository games,
                               IdempotencyRecordRepository idempotencyRecords,
@@ -73,7 +75,8 @@ public class GameSessionService {
                               PlayerIdempotencyRecordRepository playerIdempotencyRecords,
                               RateLimiter rateLimiter,
                               Clock clock,
-                              GameFinisher finisher) {
+                              GameFinisher finisher,
+                              PlayerRepository playerRepository) {
         this.games = games;
         this.idempotencyRecords = idempotencyRecords;
         this.tokens = tokens;
@@ -85,6 +88,7 @@ public class GameSessionService {
         this.rateLimiter = rateLimiter;
         this.clock = clock;
         this.finisher = finisher;
+        this.playerRepository = playerRepository;
     }
 
     @Transactional
@@ -563,6 +567,132 @@ public class GameSessionService {
         return finisher.finish(entity, null, "DRAW_AGREED");
     }
 
+    // Rematch accepts only the Bearer credential (legacySeatToken passed as null), same as
+    // resign/draw. The fingerprint's ":rematch:" discriminator plus the action keeps a key reused
+    // across /rematch, /draw, /resign, or /actions from ever replaying the wrong stored shape.
+    // Ordering (Pattern A, mirrors offerDraw): validate key -> fingerprint -> lock row -> resolve
+    // seat -> idempotency replay -> eligibility -> action logic -> idempotency record write.
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public GameResponse offerRematch(UUID id, String bearerToken, String idempotencyKey, String action) {
+        validateIdempotencyKey(idempotencyKey);
+        String fingerprint = tokens.hash(bearerToken + ":rematch:" + idempotencyKey + ":" + action);
+        GameSessionEntity entity = findGameForUpdate(id);
+        Player player = seatResolver.resolve(entity, bearerToken, null);
+        String side = player.name();
+        String opponentSide = player.opponent().name();
+
+        var previous = idempotencyRecords.findByGameIdAndIdempotencyKey(id, idempotencyKey);
+        if (previous.isPresent()) {
+            if (!previous.get().getRequestFingerprint().equals(fingerprint)) {
+                throw new ApiException(HttpStatus.CONFLICT, "IDEMPOTENCY_KEY_REUSED",
+                        "This idempotency key was already used for a different request");
+            }
+            return readJson(previous.get().getResponseJson(), GameResponse.class);
+        }
+        // Once a rematch game already exists, any further call (from either side, any action)
+        // replays the original's current response idempotently, per spec M2.6 - this check runs
+        // before the eligibility checks below, since a finished+linked original would otherwise
+        // fail the (still-applicable) status/window checks even though the rematch already happened.
+        if (entity.getRematchGameId() != null) {
+            GameResponse existing = toResponse(entity, readState(entity));
+            idempotencyRecords.saveAndFlush(new IdempotencyRecordEntity(
+                    UUID.randomUUID(), id, idempotencyKey, fingerprint, writeJson(existing), clock.instant()));
+            return existing;
+        }
+        if (!List.of("WHITE_WON", "BLACK_WON", "DRAWN").contains(entity.getStatus())
+                || entity.getWhitePlayerId() == null || entity.getBlackPlayerId() == null
+                || entity.getFinishedAt() == null
+                || !clock.instant().isBefore(entity.getFinishedAt().plus(Duration.ofMinutes(5)))) {
+            throw new ApiException(HttpStatus.CONFLICT, "GAME_NOT_ACTIVE", "This game cannot be rematched");
+        }
+
+        GameResponse response = switch (action) {
+            case "OFFER" -> {
+                if (entity.hasPendingRematchOfferFrom(opponentSide)) {
+                    // Both sides asked for a rematch around the same time; the second request
+                    // serializes behind the row lock and sees the first offer already pending -
+                    // treat it as an accept so exactly one new game is created.
+                    yield createRematchGame(entity);
+                }
+                if (entity.hasPendingRematchOfferFrom(side)) {
+                    yield toResponse(entity, readState(entity)); // idempotent no-op, already offered
+                }
+                entity.offerRematch(side, clock.instant());
+                entity = games.saveAndFlush(entity);
+                GameResponse offered = toResponse(entity, readState(entity));
+                publishAfterCommit(id, offered);
+                yield offered;
+            }
+            case "ACCEPT" -> {
+                if (!entity.hasPendingRematchOfferFrom(opponentSide)) {
+                    throw new ApiException(HttpStatus.CONFLICT, "NO_PENDING_OFFER", "There is no pending rematch offer to accept");
+                }
+                yield createRematchGame(entity);
+            }
+            case "DECLINE" -> {
+                if (!entity.hasPendingRematchOfferFrom(opponentSide)) {
+                    throw new ApiException(HttpStatus.CONFLICT, "NO_PENDING_OFFER", "There is no pending rematch offer to decline");
+                }
+                entity.offerRematch(null, clock.instant());
+                entity = games.saveAndFlush(entity);
+                GameResponse declined = toResponse(entity, readState(entity));
+                publishAfterCommit(id, declined);
+                yield declined;
+            }
+            default -> throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "action must be OFFER, ACCEPT, or DECLINE");
+        };
+
+        idempotencyRecords.saveAndFlush(new IdempotencyRecordEntity(
+                UUID.randomUUID(), id, idempotencyKey, fingerprint, writeJson(response), clock.instant()));
+        return response;
+    }
+
+    // Creates the rematch game in the same transaction as the caller (offerRematch), so throwing
+    // (e.g. TOO_MANY_ACTIVE_GAMES) rolls back any partial write and leaves the original's
+    // rematchOfferedBy untouched, per spec ("旧对局的 OFFER 保持不变"). Colors swap unconditionally:
+    // the new game's WHITE is whoever was BLACK in the original, and vice versa - this holds no
+    // matter which side calls ACCEPT, or which side's OFFER triggers the "both offered" path, so it
+    // does not depend on `acceptingPlayer` at all.
+    private GameResponse createRematchGame(GameSessionEntity original) {
+        PlayerEntity newWhite = playerByIdOrThrow(original.getBlackPlayerId());
+        PlayerEntity newBlack = playerByIdOrThrow(original.getWhitePlayerId());
+
+        long whiteActiveGames = games.countActiveGamesForPlayer(newWhite.getId(), ACTIVE_STATUSES);
+        long blackActiveGames = games.countActiveGamesForPlayer(newBlack.getId(), ACTIVE_STATUSES);
+        if (whiteActiveGames >= 5 || blackActiveGames >= 5) {
+            throw new ApiException(HttpStatus.CONFLICT, "TOO_MANY_ACTIVE_GAMES",
+                    "A player already has 5 active or waiting games");
+        }
+
+        TimeControl timeControl = original.getBaseMs() != null && original.getIncrementMs() != null
+                ? new TimeControl(original.getBaseMs(), original.getIncrementMs())
+                : TimeControl.DEFAULT;
+
+        GameState state = GameEngine.newGame().state();
+        Instant now = clock.instant();
+        GameSessionEntity newGame = new GameSessionEntity(UUID.randomUUID(), newWhite.getNickname(),
+                newBlack.getNickname(), null, null, "IN_PROGRESS", writeJson(state), now);
+        newGame.assignPlayers(newWhite.getId(), newBlack.getId());
+        newGame.assignRoomCode(generateUniqueRoomCode());
+        newGame.setTimeControl(timeControl.baseMs(), timeControl.incrementMs());
+        newGame.startClock(timeControl.baseMs(), timeControl.incrementMs(), now); // White's 30s first-move grace starts immediately
+        newGame = games.saveAndFlush(newGame);
+
+        original.linkRematchGame(newGame.getId(), now);
+        original = games.saveAndFlush(original);
+
+        GameResponse newGameResponse = toResponse(newGame, state);
+        publishAfterCommit(newGame.getId(), newGameResponse);
+        GameResponse originalResponse = toResponse(original, readState(original));
+        publishAfterCommit(original.getId(), originalResponse); // so the original game's viewers see rematchGameId too
+        return originalResponse; // caller reads rematchGameId from this
+    }
+
+    private PlayerEntity playerByIdOrThrow(UUID playerId) {
+        return playerRepository.findById(playerId)
+                .orElseThrow(() -> new IllegalStateException("Player referenced by a game no longer exists: " + playerId));
+    }
+
     private String engineWinReason(GameState state) {
         Player loser = state.winner().opponent();
         return state.piecesOnBoard(loser) < 3 ? "NO_PIECES" : "NO_MOVES";
@@ -587,7 +717,8 @@ public class GameSessionService {
                 entity.getBlackPlayer(), entity.getStatus(), state.phase(), state,
                 List.copyOf(engine.legalPlacements()), legalMoves, List.copyOf(engine.removablePieces()),
                 entity.getCreatedAt(), entity.getUpdatedAt(), clockView(entity),
-                entity.getDrawOfferedBy(), resultView(entity));
+                entity.getDrawOfferedBy(), resultView(entity),
+                entity.getRematchOfferedBy(), entity.getRematchGameId());
     }
 
     private ResultView resultView(GameSessionEntity entity) {

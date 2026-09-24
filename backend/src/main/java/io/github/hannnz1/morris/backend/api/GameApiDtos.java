@@ -80,7 +80,9 @@ public final class GameApiDtos {
             Instant updatedAt,
             ClockView clock,
             String drawOfferedBy,
-            ResultView result
+            ResultView result,
+            String rematchOfferedBy,
+            UUID rematchGameId
     ) {
     }
 
