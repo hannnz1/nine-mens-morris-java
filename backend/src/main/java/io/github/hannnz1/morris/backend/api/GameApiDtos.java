@@ -62,6 +62,9 @@ public final class GameApiDtos {
     ) {
     }
 
+    public record DrawActionRequest(@NotBlank String action) {
+    }
+
     public record GameResponse(
             UUID id,
             long version,
@@ -75,11 +78,16 @@ public final class GameApiDtos {
             List<BoardPosition> removablePieces,
             Instant createdAt,
             Instant updatedAt,
-            ClockView clock
+            ClockView clock,
+            String drawOfferedBy,
+            ResultView result
     ) {
     }
 
     public record ClockView(long whiteMs, long blackMs, boolean running, Instant serverNow) {
+    }
+
+    public record ResultView(String winner, String reason) {
     }
 
     public record ApiError(

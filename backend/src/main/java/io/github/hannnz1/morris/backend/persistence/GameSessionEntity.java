@@ -228,6 +228,28 @@ public class GameSessionEntity {
         return drawOfferedBy;
     }
 
+    public boolean hasPendingDrawOfferFrom(String side) {
+        return side.equals(drawOfferedBy);
+    }
+
+    public void offerDraw(String side, Instant now) {
+        this.drawOfferedBy = side;
+        if ("WHITE".equals(side)) {
+            whiteDrawOffers++;
+        } else {
+            blackDrawOffers++;
+        }
+        this.updatedAt = now;
+    }
+
+    public void clearDrawOffer() {
+        this.drawOfferedBy = null;
+    }
+
+    public int drawOffersUsedBy(String side) {
+        return "WHITE".equals(side) ? whiteDrawOffers : blackDrawOffers;
+    }
+
     public short getWhiteDrawOffers() {
         return whiteDrawOffers;
     }

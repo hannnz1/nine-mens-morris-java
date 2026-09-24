@@ -11,6 +11,7 @@ import io.github.hannnz1.morris.backend.api.GameApiDtos.GameResponse;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.JoinGameRequest;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.JoinGameResponse;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.PlayerCredential;
+import io.github.hannnz1.morris.backend.api.GameApiDtos.ResultView;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.RoomLookupResponse;
 import io.github.hannnz1.morris.backend.api.PlayerApiDtos.GameListResponse;
 import io.github.hannnz1.morris.backend.api.PlayerApiDtos.GameSummary;
@@ -48,6 +49,7 @@ public class GameSessionService {
     private static final org.slf4j.Logger LOGGER = org.slf4j.LoggerFactory.getLogger(GameSessionService.class);
     private static final List<String> ACTIVE_STATUSES = List.of("WAITING_FOR_PLAYER", "IN_PROGRESS");
     private static final List<String> FINISHED_STATUSES = List.of("WHITE_WON", "BLACK_WON", "DRAWN", "ABORTED", "CANCELLED");
+    private static final int MAX_DRAW_OFFERS = 3;
 
     private final GameSessionRepository games;
     private final IdempotencyRecordRepository idempotencyRecords;
@@ -393,6 +395,14 @@ public class GameSessionService {
             }
         }
 
+        // Per spec M2.6 ("对方走了一步,就视为拒绝"): a legally-applied move by either side auto-clears
+        // any pending draw offer while the game continues. A pending offer only ever belongs to one
+        // side, so this covers both the responder playing on (declining) and the offerer themselves
+        // moving after their own offer.
+        if (entity.getDrawOfferedBy() != null) {
+            entity.clearDrawOffer();
+        }
+
         entity.updateState(statusOf(nextState), writeJson(nextState), clock.instant());
         entity = games.saveAndFlush(entity);
         GameResponse response = toResponse(entity, nextState);
@@ -473,6 +483,86 @@ public class GameSessionService {
         return response;
     }
 
+    // Draw offer/accept/decline accepts only the Bearer credential (legacySeatToken passed as
+    // null), same as resign/cancel. The fingerprint's ":draw:" discriminator plus the action keeps
+    // a key reused across /draw, /resign, /cancel, or /actions from ever replaying the wrong stored
+    // shape - it fails the fingerprint match instead. The idempotency replay happens before the
+    // IN_PROGRESS status check (per spec Pattern A) so a retried request against an already-finished
+    // (e.g. drawn) game still replays its original 200 instead of a fresh 409.
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public GameResponse offerDraw(UUID id, String bearerToken, String idempotencyKey, String action) {
+        validateIdempotencyKey(idempotencyKey);
+        String fingerprint = tokens.hash(bearerToken + ":draw:" + idempotencyKey + ":" + action);
+        GameSessionEntity entity = findGameForUpdate(id);
+        Player player = seatResolver.resolve(entity, bearerToken, null);
+        String side = player.name();
+        String opponentSide = player.opponent().name();
+
+        var previous = idempotencyRecords.findByGameIdAndIdempotencyKey(id, idempotencyKey);
+        if (previous.isPresent()) {
+            if (!previous.get().getRequestFingerprint().equals(fingerprint)) {
+                throw new ApiException(HttpStatus.CONFLICT, "IDEMPOTENCY_KEY_REUSED",
+                        "This idempotency key was already used for a different request");
+            }
+            return readJson(previous.get().getResponseJson(), GameResponse.class);
+        }
+        if (!"IN_PROGRESS".equals(entity.getStatus())) {
+            throw new ApiException(HttpStatus.CONFLICT, "GAME_NOT_ACTIVE", "The game is not active");
+        }
+
+        GameResponse response = switch (action) {
+            case "OFFER" -> {
+                if (entity.hasPendingDrawOfferFrom(opponentSide)) {
+                    // Both sides offered around the same time; the second request serializes behind
+                    // the row lock and sees the first offer already pending - treat it as an accept.
+                    yield finishAsDraw(entity);
+                }
+                if (entity.hasPendingDrawOfferFrom(side)) {
+                    yield toResponse(entity, readState(entity)); // idempotent no-op, already offered
+                }
+                if (entity.drawOffersUsedBy(side) >= MAX_DRAW_OFFERS) {
+                    throw new ApiException(HttpStatus.CONFLICT, "OFFER_LIMIT_REACHED",
+                            "You have already offered a draw the maximum number of times");
+                }
+                entity.offerDraw(side, clock.instant());
+                entity = games.saveAndFlush(entity);
+                GameResponse offered = toResponse(entity, readState(entity));
+                publishAfterCommit(id, offered);
+                yield offered;
+            }
+            case "ACCEPT" -> {
+                if (!entity.hasPendingDrawOfferFrom(opponentSide)) {
+                    throw new ApiException(HttpStatus.CONFLICT, "NO_PENDING_OFFER", "There is no pending draw offer to accept");
+                }
+                yield finishAsDraw(entity);
+            }
+            case "DECLINE" -> {
+                if (!entity.hasPendingDrawOfferFrom(opponentSide)) {
+                    throw new ApiException(HttpStatus.CONFLICT, "NO_PENDING_OFFER", "There is no pending draw offer to decline");
+                }
+                entity.clearDrawOffer();
+                entity = games.saveAndFlush(entity);
+                GameResponse declined = toResponse(entity, readState(entity));
+                publishAfterCommit(id, declined);
+                yield declined;
+            }
+            default -> throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "action must be OFFER, ACCEPT, or DECLINE");
+        };
+
+        idempotencyRecords.saveAndFlush(new IdempotencyRecordEntity(
+                UUID.randomUUID(), id, idempotencyKey, fingerprint, writeJson(response), clock.instant()));
+        return response;
+    }
+
+    // ACCEPT (and the "both sides offered at once" OFFER-treated-as-accept branch) finish through
+    // GameFinisher.finish, which is the only terminal-write path - it already commits (saveAndFlush)
+    // and schedules the post-commit WebSocket broadcast itself, so offerDraw's own
+    // idempotencyRecords.saveAndFlush below still runs (to record the *draw offer's* idempotency
+    // key against the terminal response), but must not publish a second time.
+    private GameResponse finishAsDraw(GameSessionEntity entity) {
+        return finisher.finish(entity, null, "DRAW_AGREED");
+    }
+
     private String engineWinReason(GameState state) {
         Player loser = state.winner().opponent();
         return state.piecesOnBoard(loser) < 3 ? "NO_PIECES" : "NO_MOVES";
@@ -496,7 +586,15 @@ public class GameSessionService {
         return new GameResponse(entity.getId(), entity.getVersion(), entity.getWhitePlayer(),
                 entity.getBlackPlayer(), entity.getStatus(), state.phase(), state,
                 List.copyOf(engine.legalPlacements()), legalMoves, List.copyOf(engine.removablePieces()),
-                entity.getCreatedAt(), entity.getUpdatedAt(), clockView(entity));
+                entity.getCreatedAt(), entity.getUpdatedAt(), clockView(entity),
+                entity.getDrawOfferedBy(), resultView(entity));
+    }
+
+    private ResultView resultView(GameSessionEntity entity) {
+        if (entity.getResultReason() == null) {
+            return null;
+        }
+        return new ResultView(entity.getResultWinner(), entity.getResultReason());
     }
 
     private ClockView clockView(GameSessionEntity entity) {

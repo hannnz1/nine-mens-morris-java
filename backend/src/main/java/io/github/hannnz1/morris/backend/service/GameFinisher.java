@@ -2,6 +2,7 @@ package io.github.hannnz1.morris.backend.service;
 
 import io.github.hannnz1.morris.backend.api.GameApiDtos.ClockView;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.GameResponse;
+import io.github.hannnz1.morris.backend.api.GameApiDtos.ResultView;
 import io.github.hannnz1.morris.backend.config.GameWebSocketHandler;
 import io.github.hannnz1.morris.backend.persistence.GameSessionEntity;
 import io.github.hannnz1.morris.backend.persistence.GameSessionRepository;
@@ -73,7 +74,15 @@ public class GameFinisher {
         return new GameResponse(entity.getId(), entity.getVersion(), entity.getWhitePlayer(),
                 entity.getBlackPlayer(), entity.getStatus(), state.phase(), state,
                 List.copyOf(engine.legalPlacements()), legalMoves, List.copyOf(engine.removablePieces()),
-                entity.getCreatedAt(), entity.getUpdatedAt(), clockView(entity));
+                entity.getCreatedAt(), entity.getUpdatedAt(), clockView(entity),
+                entity.getDrawOfferedBy(), resultView(entity));
+    }
+
+    private ResultView resultView(GameSessionEntity entity) {
+        if (entity.getResultReason() == null) {
+            return null;
+        }
+        return new ResultView(entity.getResultWinner(), entity.getResultReason());
     }
 
     private ClockView clockView(GameSessionEntity entity) {

@@ -2,6 +2,7 @@ package io.github.hannnz1.morris.backend.api;
 
 import io.github.hannnz1.morris.backend.api.GameApiDtos.ActionRequest;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.CreateGameRequest;
+import io.github.hannnz1.morris.backend.api.GameApiDtos.DrawActionRequest;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.CreateGameResponse;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.CreateGameRequestForPlayer;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.GameResponse;
@@ -155,6 +156,14 @@ public class GameController {
                                @RequestHeader(value = "Authorization", required = false) String authorization,
                                @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
         return gameSessions.cancel(id, bearerToken(authorization), idempotencyKey);
+    }
+
+    @PostMapping("/{id}/draw")
+    public GameResponse draw(@PathVariable("id") UUID id,
+                             @RequestHeader(value = "Authorization", required = false) String authorization,
+                             @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+                             @Valid @RequestBody DrawActionRequest request) {
+        return gameSessions.offerDraw(id, bearerToken(authorization), idempotencyKey, request.action());
     }
 
     private String bearerToken(String authorizationHeader) {
