@@ -30,6 +30,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 // BearerCreatedGameFlowIntegrationTest's real end-to-end HTTP flow (create/join/act via
 // TestRestTemplate), with ChessClockTest's MutableClock-override pattern for pushing the clock past
 // the deadline without sleeping.
+//
+// White's move here is its FIRST move, so per spec M2.3's first-move grace this actually finishes
+// as ABORTED (winner null), not TIMEOUT - see ChessClockTest for that distinction at the service
+// level. At the HTTP layer both outcomes are identical: 409 GAME_NOT_ACTIVE, since
+// GameController.action maps ActionOutcome.rejectedByTimeout() straight to 409 regardless of which
+// terminal reason the service settled on.
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class ClockTimeoutHttpIntegrationTest extends PostgresIntegrationTest {
 
@@ -88,6 +94,23 @@ class ClockTimeoutHttpIntegrationTest extends PostgresIntegrationTest {
                 Map.class);
         assertThat(retry.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
         assertThat(retry.getBody().get("code")).isEqualTo("GAME_NOT_ACTIVE");
+
+        // A THIRD attempt with a fresh Idempotency-Key (not a replay) must also be rejected, not
+        // re-enter the timeout branch and rewrite the already-committed result (Important #3).
+        HttpHeaders freshKeyHeaders = bearer(whiteToken);
+        freshKeyHeaders.set("Idempotency-Key", "timeout-act-2-fresh-key");
+        var freshAttempt = rest.exchange(url("/api/v1/games/" + gameId + "/actions"), HttpMethod.POST,
+                new HttpEntity<>(Map.of("type", "PLACE", "to", "A1", "expectedVersion", version), freshKeyHeaders),
+                Map.class);
+        assertThat(freshAttempt.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(freshAttempt.getBody().get("code")).isEqualTo("GAME_NOT_ACTIVE");
+
+        // White's move was its FIRST move, so per the first-move grace this settled as ABORTED
+        // (winner null), not TIMEOUT - and none of the three rejected attempts above rewrote it.
+        var getResponse = rest.exchange(url("/api/v1/games/" + gameId), HttpMethod.GET,
+                new HttpEntity<>(bearer(whiteToken)), Map.class);
+        assertThat(getResponse.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(getResponse.getBody().get("status")).isEqualTo("ABORTED");
     }
 
     private HttpHeaders bearer(String token) {

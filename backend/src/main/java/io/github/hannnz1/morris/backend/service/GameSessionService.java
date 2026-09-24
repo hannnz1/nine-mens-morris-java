@@ -200,6 +200,14 @@ public class GameSessionService {
         }
         entity.assignPlayers(entity.getWhitePlayerId(), black.getId());
         entity.joinBlackPlayer(black.getNickname(), "", clock.instant());
+        // A Bearer game created before M2 shipped has a NULL base_ms/increment_ms (createForPlayer
+        // didn't call setTimeControl yet); fall back to the 5+3 default rather than unboxing null.
+        // Pre-M2 games that were already IN_PROGRESS at deploy are untouched by this method (they
+        // never re-enter join) and stay clockless forever, same as the anonymous join() path, which
+        // never calls startClock at all.
+        if (entity.getBaseMs() == null) {
+            entity.setTimeControl(TimeControl.DEFAULT.baseMs(), TimeControl.DEFAULT.incrementMs());
+        }
         entity.startClock(entity.getBaseMs(), entity.getIncrementMs(), clock.instant());
         entity = games.saveAndFlush(entity);
         JoinGameResponse response = new JoinGameResponse(toResponse(entity, readState(entity)), null);
@@ -285,12 +293,29 @@ public class GameSessionService {
             }
             // The stored JSON is an ActionOutcome (not a bare GameResponse) precisely so a retried
             // request after a timeout rejection replays as rejectedByTimeout = true too, not a 200.
-            return readJson(previous.get().getResponseJson(), ActionOutcome.class);
+            ActionOutcome outcome = readJson(previous.get().getResponseJson(), ActionOutcome.class);
+            if (outcome.game() == null) {
+                // idempotency_records has existed since V1: a record written before this ActionOutcome
+                // wrapper shipped holds a bare GameResponse. Jackson silently ignores the unknown
+                // "game"/"rejectedByTimeout" properties and would otherwise hand back
+                // ActionOutcome(null, false) - a 200 with an empty body. Re-read the same JSON as the
+                // old shape and wrap it instead.
+                outcome = new ActionOutcome(readJson(previous.get().getResponseJson(), GameResponse.class), false);
+            }
+            return outcome;
         }
 
         if (entity.getBlackPlayer() == null) {
             throw new ApiException(HttpStatus.CONFLICT, "WAITING_FOR_PLAYER",
                     "A second player must join before the game can start");
+        }
+        // Guards against re-entering the clock-timeout/mill/no-moves branches below a second time
+        // for a game GameFinisher.finish already closed out: after a TIMEOUT or ABORTED finish,
+        // state_json still has no engine winner and turnDeadlineAt stays in the past, so a fresh
+        // request (new idempotency key, current version) would otherwise re-enter the timeout check
+        // and call finisher.finish again, rewriting the result and re-broadcasting it.
+        if (!"IN_PROGRESS".equals(entity.getStatus())) {
+            throw new ApiException(HttpStatus.CONFLICT, "GAME_NOT_ACTIVE", "This game is not in progress");
         }
         GameState currentState = readState(entity);
         if (request.expectedVersion() != entity.getVersion()) {
@@ -313,12 +338,15 @@ public class GameSessionService {
             Instant timeoutCheckNow = clock.instant();
             if (!timeoutCheckNow.isBefore(entity.getTurnDeadlineAt())) {
                 // The mover's own clock had already reached zero before this action arrived: the
-                // action is never applied, and the game ends in a loss for the mover, exactly as if
-                // the background TimeoutScanner (Task 6) had caught it first. finisher.finish commits
-                // the verdict inside this transaction; rejectedByTimeout = true tells
+                // action is never applied. Per spec M2.3's first-move grace, a late FIRST move ends
+                // the game as ABORTED (winner null) rather than a TIMEOUT loss - ClockTimeoutOutcome
+                // is the single place that decision is made, shared with Task 6's background
+                // TimeoutScanner so the two paths can never disagree. finisher.finish commits the
+                // verdict inside this transaction either way; rejectedByTimeout = true tells
                 // GameController.action to turn this into an HTTP 409 GAME_NOT_ACTIVE, per spec
                 // M2.3's "服务方法返回一个「结果对象」,由 Controller 转换为 409 响应,而不是在事务内抛异常".
-                GameResponse timedOut = finisher.finish(entity, player.opponent(), "TIMEOUT");
+                var expiry = ClockTimeoutOutcome.forExpiry(currentState);
+                GameResponse timedOut = finisher.finish(entity, expiry.winner(), expiry.reason());
                 ActionOutcome outcome = new ActionOutcome(timedOut, true);
                 idempotencyRecords.saveAndFlush(new IdempotencyRecordEntity(
                         UUID.randomUUID(), id, idempotencyKey, fingerprint, writeJson(outcome), timeoutCheckNow));
@@ -345,13 +373,23 @@ public class GameSessionService {
 
         if (hasClock) {
             boolean handoff = nextState.currentPlayer() != currentState.currentPlayer(); // turn passed, not still removing
-            long settledMs = handoff ? remainingAfter + entity.getIncrementMs() : remainingAfter;
+            // Per spec M2.3: a side's own first move (piecesToPlace == 9 in the state before that
+            // move) deducts no main time and adds no increment - the mover's remaining time stays at
+            // baseMs (remainingBefore, since nothing has been subtracted from it yet). A first move
+            // can never form a mill, so this branch and the terminal one above never overlap.
+            boolean moverFirstMove = currentState.piecesToPlace(player) == 9;
+            long settledMs = moverFirstMove ? remainingBefore
+                    : (handoff ? remainingAfter + entity.getIncrementMs() : remainingAfter);
+            long opponentRemaining = whiteToMove ? entity.getBlackRemainingMs() : entity.getWhiteRemainingMs();
+            // When the turn hands off to a side about to make ITS first move, that side's deadline is
+            // now + 30s grace (not its remaining time), per spec M2.3 - independent of whether the
+            // mover who just moved was itself in its own first move.
+            boolean nextIsFirstMove = handoff && nextState.piecesToPlace(nextState.currentPlayer()) == 9;
+            long nextDeadlineBudgetMs = !handoff ? settledMs : (nextIsFirstMove ? 30_000L : opponentRemaining);
             if (whiteToMove) {
-                entity.settleClock(settledMs, entity.getBlackRemainingMs(), clock.instant(),
-                        handoff ? entity.getBlackRemainingMs() : settledMs);
+                entity.settleClock(settledMs, entity.getBlackRemainingMs(), clock.instant(), nextDeadlineBudgetMs);
             } else {
-                entity.settleClock(entity.getWhiteRemainingMs(), settledMs, clock.instant(),
-                        handoff ? entity.getWhiteRemainingMs() : settledMs);
+                entity.settleClock(entity.getWhiteRemainingMs(), settledMs, clock.instant(), nextDeadlineBudgetMs);
             }
         }
 
