@@ -45,7 +45,7 @@ public class GameSessionService {
 
     private static final org.slf4j.Logger LOGGER = org.slf4j.LoggerFactory.getLogger(GameSessionService.class);
     private static final List<String> ACTIVE_STATUSES = List.of("WAITING_FOR_PLAYER", "IN_PROGRESS");
-    private static final List<String> FINISHED_STATUSES = List.of("WHITE_WON", "BLACK_WON");
+    private static final List<String> FINISHED_STATUSES = List.of("WHITE_WON", "BLACK_WON", "DRAWN", "ABORTED");
 
     private final GameSessionRepository games;
     private final IdempotencyRecordRepository idempotencyRecords;
@@ -57,6 +57,7 @@ public class GameSessionService {
     private final PlayerIdempotencyRecordRepository playerIdempotencyRecords;
     private final RateLimiter rateLimiter;
     private final Clock clock;
+    private final GameFinisher finisher;
 
     public GameSessionService(GameSessionRepository games,
                               IdempotencyRecordRepository idempotencyRecords,
@@ -67,7 +68,8 @@ public class GameSessionService {
                               RoomCodeGenerator roomCodes,
                               PlayerIdempotencyRecordRepository playerIdempotencyRecords,
                               RateLimiter rateLimiter,
-                              Clock clock) {
+                              Clock clock,
+                              GameFinisher finisher) {
         this.games = games;
         this.idempotencyRecords = idempotencyRecords;
         this.tokens = tokens;
@@ -78,6 +80,7 @@ public class GameSessionService {
         this.playerIdempotencyRecords = playerIdempotencyRecords;
         this.rateLimiter = rateLimiter;
         this.clock = clock;
+        this.finisher = finisher;
     }
 
     @Transactional
@@ -288,6 +291,17 @@ public class GameSessionService {
 
         GameState nextState = GameEngine.restore(currentState)
                 .apply(new GameAction(request.type(), request.from(), request.to()));
+
+        if (nextState.winner() != null || nextState.drawReason() != null) {
+            entity.updateState(statusOf(nextState), writeJson(nextState), clock.instant());
+            entity = games.saveAndFlush(entity);
+            GameResponse finishedResponse = finisher.finish(entity, nextState.winner(),
+                    nextState.winner() != null ? engineWinReason(nextState) : nextState.drawReason());
+            idempotencyRecords.saveAndFlush(new IdempotencyRecordEntity(
+                    UUID.randomUUID(), id, idempotencyKey, fingerprint, writeJson(finishedResponse), clock.instant()));
+            return finishedResponse;
+        }
+
         entity.updateState(statusOf(nextState), writeJson(nextState), clock.instant());
         entity = games.saveAndFlush(entity);
         GameResponse response = toResponse(entity, nextState);
@@ -296,6 +310,11 @@ public class GameSessionService {
                 UUID.randomUUID(), id, idempotencyKey, fingerprint, writeJson(response), clock.instant()));
         publishAfterCommit(id, response);
         return response;
+    }
+
+    private String engineWinReason(GameState state) {
+        Player loser = state.winner().opponent();
+        return state.piecesOnBoard(loser) < 3 ? "NO_PIECES" : "NO_MOVES";
     }
 
     private GameSessionEntity findGame(UUID id) {
