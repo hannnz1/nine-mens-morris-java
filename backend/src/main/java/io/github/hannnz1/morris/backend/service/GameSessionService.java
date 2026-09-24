@@ -33,6 +33,7 @@ import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
+import java.time.Clock;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -55,6 +56,7 @@ public class GameSessionService {
     private final RoomCodeGenerator roomCodes;
     private final PlayerIdempotencyRecordRepository playerIdempotencyRecords;
     private final RateLimiter rateLimiter;
+    private final Clock clock;
 
     public GameSessionService(GameSessionRepository games,
                               IdempotencyRecordRepository idempotencyRecords,
@@ -64,7 +66,8 @@ public class GameSessionService {
                               SeatResolver seatResolver,
                               RoomCodeGenerator roomCodes,
                               PlayerIdempotencyRecordRepository playerIdempotencyRecords,
-                              RateLimiter rateLimiter) {
+                              RateLimiter rateLimiter,
+                              Clock clock) {
         this.games = games;
         this.idempotencyRecords = idempotencyRecords;
         this.tokens = tokens;
@@ -74,12 +77,13 @@ public class GameSessionService {
         this.roomCodes = roomCodes;
         this.playerIdempotencyRecords = playerIdempotencyRecords;
         this.rateLimiter = rateLimiter;
+        this.clock = clock;
     }
 
     @Transactional
     public CreateGameResponse create(CreateGameRequest request) {
         String whiteToken = tokens.generate();
-        Instant now = Instant.now();
+        Instant now = clock.instant();
         GameState state = GameEngine.newGame().state();
         GameSessionEntity entity = new GameSessionEntity(
                 UUID.randomUUID(), request.whitePlayer().trim(),
@@ -122,7 +126,7 @@ public class GameSessionService {
             throw new ApiException(HttpStatus.CONFLICT, "GAME_ALREADY_FULL",
                     "The game already has two players");
         }
-        entity.joinBlackPlayer(request.blackPlayer().trim(), tokens.hash(blackToken), Instant.now());
+        entity.joinBlackPlayer(request.blackPlayer().trim(), tokens.hash(blackToken), clock.instant());
         entity = games.saveAndFlush(entity);
         GameResponse response = toResponse(entity, readState(entity));
         publishAfterCommit(id, response);
@@ -151,7 +155,7 @@ public class GameSessionService {
             throw new ApiException(HttpStatus.CONFLICT, "TOO_MANY_ACTIVE_GAMES", "You already have 5 active or waiting games");
         }
 
-        Instant now = Instant.now();
+        Instant now = clock.instant();
         GameState state = GameEngine.newGame().state();
         GameSessionEntity entity = new GameSessionEntity(UUID.randomUUID(), white.getNickname(), null,
                 null, null, "WAITING_FOR_PLAYER", writeJson(state), now);
@@ -188,11 +192,11 @@ public class GameSessionService {
             throw new ApiException(HttpStatus.CONFLICT, "GAME_ALREADY_FULL", "The game already has two players");
         }
         entity.assignPlayers(entity.getWhitePlayerId(), black.getId());
-        entity.joinBlackPlayer(black.getNickname(), "", Instant.now());
+        entity.joinBlackPlayer(black.getNickname(), "", clock.instant());
         entity = games.saveAndFlush(entity);
         JoinGameResponse response = new JoinGameResponse(toResponse(entity, readState(entity)), null);
         playerIdempotencyRecords.saveAndFlush(new PlayerIdempotencyRecordEntity(
-                black.getId(), idempotencyKey, fingerprint, writeJson(response), Instant.now()));
+                black.getId(), idempotencyKey, fingerprint, writeJson(response), clock.instant()));
         publishAfterCommit(id, response.game());
         return response;
     }
@@ -284,12 +288,12 @@ public class GameSessionService {
 
         GameState nextState = GameEngine.restore(currentState)
                 .apply(new GameAction(request.type(), request.from(), request.to()));
-        entity.updateState(statusOf(nextState), writeJson(nextState), Instant.now());
+        entity.updateState(statusOf(nextState), writeJson(nextState), clock.instant());
         entity = games.saveAndFlush(entity);
         GameResponse response = toResponse(entity, nextState);
 
         idempotencyRecords.saveAndFlush(new IdempotencyRecordEntity(
-                UUID.randomUUID(), id, idempotencyKey, fingerprint, writeJson(response), Instant.now()));
+                UUID.randomUUID(), id, idempotencyKey, fingerprint, writeJson(response), clock.instant()));
         publishAfterCommit(id, response);
         return response;
     }
