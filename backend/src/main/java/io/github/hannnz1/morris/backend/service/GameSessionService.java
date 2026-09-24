@@ -442,6 +442,12 @@ public class GameSessionService {
         return readJson(entity.getStateJson(), GameState.class);
     }
 
+    // Package-visible wrapper around readState so TimeoutScanner can obtain the GameState it needs
+    // to call ClockTimeoutOutcome.forExpiry without a second Jackson deserialization path (Task 6).
+    GameState stateOf(GameSessionEntity entity) {
+        return readState(entity);
+    }
+
     private String statusOf(GameState state) {
         return state.winner() == null ? "IN_PROGRESS" : state.winner().name() + "_WON";
     }

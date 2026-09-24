@@ -20,6 +20,15 @@ public interface GameSessionRepository extends JpaRepository<GameSessionEntity, 
 
     Optional<GameSessionEntity> findByRoomCodeAndStatusIn(String roomCode, java.util.List<String> statuses);
 
+    // Unlocked candidate selection for TimeoutScanner's "Pattern B" scan, per spec M2.3: the scanner
+    // takes no lock here - each candidate id is re-checked and locked individually afterward, one
+    // transaction per id, so a concurrent action finishing the same game first is never overwritten.
+    @Query("""
+        select game.id from GameSessionEntity game
+        where game.status = 'IN_PROGRESS' and game.turnDeadlineAt <= :now
+        """)
+    List<UUID> findTimedOutCandidateIds(@Param("now") Instant now);
+
     // NOT a derived-query method (countByWhitePlayerIdOrBlackPlayerIdAndStatusIn): Spring Data
     // derived query names bind "And" more tightly than "Or", so that method name actually means
     // "white = ? OR (black = ? AND status IN ?)", not the intended "(white = ? OR black = ?) AND

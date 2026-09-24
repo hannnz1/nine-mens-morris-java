@@ -6,6 +6,14 @@ spring:
     driver-class-name: org.h2.Driver
     hikari:
       connection-init-sql: "SET LOCK_TIMEOUT 2000"
+      # Each PostgresIntegrationTest subclass with its own @TestConfiguration Clock bean gets its
+      # own Spring context and thus its own Hikari pool, and Spring's test context cache keeps all
+      # of them open (up to spring.test.context.cache.maxSize) for the rest of the JVM's life. With
+      # Hikari's default max pool size of 10 and a growing number of such contexts, the full suite
+      # can exceed Postgres's default max_connections ("FATAL: sorry, too many clients already").
+      # A small per-pool cap keeps the total well under that limit without affecting any single
+      # test's correctness - the concurrency tests only ever need 2-3 connections at once.
+      maximum-pool-size: 5
   jpa:
     open-in-view: false
     hibernate:
@@ -15,3 +23,10 @@ spring:
     locations: classpath:db/migration
     baseline-on-migrate: true
     baseline-version: 1
+
+# A live 1-second TimeoutScanner sweep (and DowntimeCompensator heartbeat) running unsupervised in
+# the shared Spring test context would finish games in the background and make MutableClock-based
+# clock tests flaky. Tests call scanOnce()/heartbeat() directly instead. See SchedulingConfig.
+morris:
+  scheduling:
+    enabled: false
