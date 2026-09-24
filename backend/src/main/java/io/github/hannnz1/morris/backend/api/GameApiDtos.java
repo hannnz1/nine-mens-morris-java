@@ -41,7 +41,7 @@ public final class GameApiDtos {
     public record PlayerCredential(Player side, String playerName, String token) {
     }
 
-    public record CreateGameRequestForPlayer() {
+    public record CreateGameRequestForPlayer(String timeControl) {
     }
 
     public record CreateGameResponse(
@@ -74,8 +74,12 @@ public final class GameApiDtos {
             Map<BoardPosition, List<BoardPosition>> legalMoves,
             List<BoardPosition> removablePieces,
             Instant createdAt,
-            Instant updatedAt
+            Instant updatedAt,
+            ClockView clock
     ) {
+    }
+
+    public record ClockView(long whiteMs, long blackMs, boolean running, Instant serverNow) {
     }
 
     public record ApiError(

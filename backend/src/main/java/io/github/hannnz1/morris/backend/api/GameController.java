@@ -3,12 +3,14 @@ package io.github.hannnz1.morris.backend.api;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.ActionRequest;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.CreateGameRequest;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.CreateGameResponse;
+import io.github.hannnz1.morris.backend.api.GameApiDtos.CreateGameRequestForPlayer;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.GameResponse;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.JoinGameRequest;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.JoinGameResponse;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.FieldError;
 import io.github.hannnz1.morris.backend.service.GameSessionService;
 import io.github.hannnz1.morris.backend.service.PlayerService;
+import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.validation.ConstraintViolation;
 import jakarta.validation.Valid;
 import jakarta.validation.Validator;
@@ -43,21 +45,26 @@ public class GameController {
     @ResponseStatus(HttpStatus.CREATED)
     public CreateGameResponse create(@RequestHeader(value = "Authorization", required = false) String authorization,
                                      @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
-                                     @RequestBody(required = false) CreateGameRequest legacyRequest) {
+                                     // Bound as a raw JsonNode (not CreateGameRequest directly): the Bearer path's body
+                                     // carries a different shape (CreateGameRequestForPlayer's timeControl) than the
+                                     // legacy anonymous path's (CreateGameRequest's whitePlayer), and Spring only reads
+                                     // the request body once, so both branches extract their own fields from the same
+                                     // parsed JSON below.
+                                     @RequestBody(required = false) JsonNode body) {
         if (authorization != null && authorization.startsWith("Bearer ")) {
             if (idempotencyKey == null || idempotencyKey.isBlank() || idempotencyKey.length() > 100) {
                 throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "Idempotency-Key is required");
             }
-            return gameSessions.createForPlayer(players.requirePlayer(authorization.substring(7)), idempotencyKey);
+            CreateGameRequestForPlayer request = new CreateGameRequestForPlayer(textOrNull(body, "timeControl"));
+            return gameSessions.createForPlayer(players.requirePlayer(authorization.substring(7)), idempotencyKey,
+                    request.timeControl());
         }
         // No Authorization header: preserve the pre-M1 anonymous create flow for in-flight legacy
         // clients. @Valid can't be declared on the shared request parameter above (an empty {}
         // Bearer-path body would then fail validation before the Bearer branch is even reached),
         // so this branch replicates Spring's own @Valid/MethodArgumentNotValidException handling
         // (same VALIDATION_FAILED code and fieldErrors shape) by validating manually.
-        if (legacyRequest == null) {
-            legacyRequest = new CreateGameRequest(null);
-        }
+        CreateGameRequest legacyRequest = new CreateGameRequest(textOrNull(body, "whitePlayer"));
         var violations = validator.validate(legacyRequest);
         if (!violations.isEmpty()) {
             List<FieldError> fieldErrors = violations.stream()
@@ -66,6 +73,13 @@ public class GameController {
             throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "The request is invalid", fieldErrors);
         }
         return gameSessions.create(legacyRequest);
+    }
+
+    private String textOrNull(JsonNode body, String field) {
+        if (body == null || !body.hasNonNull(field)) {
+            return null;
+        }
+        return body.get(field).asText();
     }
 
     private FieldError toFieldError(ConstraintViolation<?> violation) {

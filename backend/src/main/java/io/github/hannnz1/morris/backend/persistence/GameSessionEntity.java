@@ -264,4 +264,23 @@ public class GameSessionEntity {
         this.turnStartedAt = now;
         this.turnDeadlineAt = now.plusSeconds(30); // first-move grace, spec M2.3
     }
+
+    // Stores the chosen time control at game creation without starting the countdown - the clock
+    // only starts (via startClock) once the second player joins, per spec M2.3.
+    public void setTimeControl(int baseMs, int incrementMs) {
+        this.baseMs = baseMs;
+        this.incrementMs = incrementMs;
+    }
+
+    // Settles the clock after a legally-applied action: records both players' remaining time,
+    // resets turnStartedAt to now, and sets the next deadline from nextDeadlineBudgetMs (the
+    // opponent's remaining time on a turn handoff, or the mover's own remaining time if the turn
+    // has not yet passed, e.g. mid-removal), matching spec M2.3 exactly.
+    public void settleClock(long whiteRemainingMs, long blackRemainingMs, Instant turnStartedAt,
+                            long nextDeadlineBudgetMs) {
+        this.whiteRemainingMs = whiteRemainingMs;
+        this.blackRemainingMs = blackRemainingMs;
+        this.turnStartedAt = turnStartedAt;
+        this.turnDeadlineAt = turnStartedAt.plusMillis(nextDeadlineBudgetMs);
+    }
 }

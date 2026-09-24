@@ -1,5 +1,6 @@
 package io.github.hannnz1.morris.backend.service;
 
+import io.github.hannnz1.morris.backend.api.GameApiDtos.ClockView;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.GameResponse;
 import io.github.hannnz1.morris.backend.config.GameWebSocketHandler;
 import io.github.hannnz1.morris.backend.persistence.GameSessionEntity;
@@ -72,7 +73,16 @@ public class GameFinisher {
         return new GameResponse(entity.getId(), entity.getVersion(), entity.getWhitePlayer(),
                 entity.getBlackPlayer(), entity.getStatus(), state.phase(), state,
                 List.copyOf(engine.legalPlacements()), legalMoves, List.copyOf(engine.removablePieces()),
-                entity.getCreatedAt(), entity.getUpdatedAt());
+                entity.getCreatedAt(), entity.getUpdatedAt(), clockView(entity));
+    }
+
+    private ClockView clockView(GameSessionEntity entity) {
+        if (entity.getTurnDeadlineAt() == null) {
+            return new ClockView(0, 0, false, clock.instant());
+        }
+        // A game that finish() just closed out is never still "running" - status is already the
+        // terminal value by the time toResponse reads it here.
+        return new ClockView(entity.getWhiteRemainingMs(), entity.getBlackRemainingMs(), false, clock.instant());
     }
 
     private void publishAfterCommit(java.util.UUID gameId, GameResponse response) {

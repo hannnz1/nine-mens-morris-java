@@ -41,13 +41,13 @@ class GameSessionServiceActiveGameLimitTest extends io.github.hannnz1.morris.bac
     void aSixthGameSucceedsOnceAllFiveEarlierGamesAreFinished() {
         PlayerEntity player = newPlayer();
         for (int i = 0; i < 5; i++) {
-            var response = gameSessions.createForPlayer(player, "finished-limit-" + i);
+            var response = gameSessions.createForPlayer(player, "finished-limit-" + i, null);
             GameSessionEntity entity = games.findById(response.game().id()).orElseThrow();
             entity.updateState("WHITE_WON", entity.getStateJson(), Instant.now());
             games.saveAndFlush(entity);
         }
 
-        assertThatCode(() -> gameSessions.createForPlayer(player, "finished-limit-sixth"))
+        assertThatCode(() -> gameSessions.createForPlayer(player, "finished-limit-sixth", null))
                 .doesNotThrowAnyException();
     }
 
@@ -55,10 +55,10 @@ class GameSessionServiceActiveGameLimitTest extends io.github.hannnz1.morris.bac
     void aSixthGameIsStillBlockedWhileFiveGamesAreGenuinelyActive() {
         PlayerEntity player = newPlayer();
         for (int i = 0; i < 5; i++) {
-            gameSessions.createForPlayer(player, "active-limit-" + i);
+            gameSessions.createForPlayer(player, "active-limit-" + i, null);
         }
 
-        assertThatThrownBy(() -> gameSessions.createForPlayer(player, "active-limit-sixth"))
+        assertThatThrownBy(() -> gameSessions.createForPlayer(player, "active-limit-sixth", null))
                 .isInstanceOf(io.github.hannnz1.morris.backend.api.ApiException.class)
                 .hasFieldOrPropertyWithValue("code", "TOO_MANY_ACTIVE_GAMES");
     }
@@ -70,7 +70,7 @@ class GameSessionServiceActiveGameLimitTest extends io.github.hannnz1.morris.bac
                 java.util.List.of("WAITING_FOR_PLAYER", "IN_PROGRESS"));
         assertThat(before).isZero();
 
-        var response = gameSessions.createForPlayer(player, "count-check-1");
+        var response = gameSessions.createForPlayer(player, "count-check-1", null);
         assertThat(games.countActiveGamesForPlayer(player.getId(),
                 java.util.List.of("WAITING_FOR_PLAYER", "IN_PROGRESS"))).isEqualTo(1);
 

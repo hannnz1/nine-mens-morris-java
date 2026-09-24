@@ -6,6 +6,7 @@ import io.github.hannnz1.morris.backend.api.ApiException;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.ActionRequest;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.CreateGameRequest;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.CreateGameResponse;
+import io.github.hannnz1.morris.backend.api.GameApiDtos.ClockView;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.GameResponse;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.JoinGameRequest;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.JoinGameResponse;
@@ -34,6 +35,7 @@ import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -138,7 +140,8 @@ public class GameSessionService {
     }
 
     @Transactional
-    public CreateGameResponse createForPlayer(PlayerEntity white, String idempotencyKey) {
+    public CreateGameResponse createForPlayer(PlayerEntity white, String idempotencyKey, String timeControlLabel) {
+        TimeControl timeControl = TimeControl.parse(timeControlLabel); // validate before any side effect
         // 20/min per player, per spec §3.5. Checked before the idempotency lookup so a retried
         // request under the same key is never itself penalized twice for the same logical create.
         if (!rateLimiter.tryAcquire("game-create:" + white.getId(), 20, java.time.Duration.ofMinutes(1))) {
@@ -164,6 +167,7 @@ public class GameSessionService {
                 null, null, "WAITING_FOR_PLAYER", writeJson(state), now);
         entity.assignPlayers(white.getId(), null);
         entity.assignRoomCode(generateUniqueRoomCode());
+        entity.setTimeControl(timeControl.baseMs(), timeControl.incrementMs()); // stores base/increment only; clock doesn't start until join
         entity = games.saveAndFlush(entity);
 
         CreateGameResponse response = new CreateGameResponse(toResponse(entity, state), null, entity.getRoomCode());
@@ -196,6 +200,7 @@ public class GameSessionService {
         }
         entity.assignPlayers(entity.getWhitePlayerId(), black.getId());
         entity.joinBlackPlayer(black.getNickname(), "", clock.instant());
+        entity.startClock(entity.getBaseMs(), entity.getIncrementMs(), clock.instant());
         entity = games.saveAndFlush(entity);
         JoinGameResponse response = new JoinGameResponse(toResponse(entity, readState(entity)), null);
         playerIdempotencyRecords.saveAndFlush(new PlayerIdempotencyRecordEntity(
@@ -251,7 +256,13 @@ public class GameSessionService {
         return toResponse(entity, readState(entity));
     }
 
-    @Transactional(isolation = Isolation.READ_COMMITTED)
+    // noRollbackFor = ApiException.class: defensive per M2.3's "先提交判负,再返回错误" requirement -
+    // a write must never be undone by an ApiException thrown later in the same call. The
+    // clock-timeout path below currently commits the TIMEOUT verdict and returns it directly rather
+    // than throwing (see the comment at that branch for why), so this doesn't fire on that path
+    // today, but it keeps the method safe against ANY future ApiException thrown after a write
+    // (including this method's other throws, none of which currently write anything first).
+    @Transactional(isolation = Isolation.READ_COMMITTED, noRollbackFor = ApiException.class)
     public GameResponse performAction(UUID id, String bearerToken, String legacySeatToken, String idempotencyKey,
                                       ActionRequest request) {
         validateIdempotencyKey(idempotencyKey);
@@ -289,6 +300,33 @@ public class GameSessionService {
                     "Only the current player can perform this action");
         }
 
+        // Clock settlement, per spec M2.3's pseudocode. entity.getTurnDeadlineAt() is null only for
+        // a pre-M2 game (legacy anonymous create/join never calls startClock) - such games have no
+        // clock at all and skip this whole block.
+        boolean hasClock = entity.getTurnDeadlineAt() != null;
+        boolean whiteToMove = player == Player.WHITE;
+        long elapsedMs = 0;
+        long remainingBefore = 0;
+        if (hasClock) {
+            Instant timeoutCheckNow = clock.instant();
+            if (!timeoutCheckNow.isBefore(entity.getTurnDeadlineAt())) {
+                // The mover's own clock had already reached zero before this action arrived: the
+                // action is rejected and the game ends in a loss for the mover, exactly as if the
+                // background TimeoutScanner (Task 6) had caught it first. finisher.finish commits
+                // the verdict; ChessClockTest.aMoveArrivingExactlyWhenTimeReachesZeroIsRejectedAsATimeout
+                // asserts this call returns that finished response directly (status BLACK_WON) rather
+                // than throwing - mirroring the mill/draw terminal branch below, not the
+                // WAITING_FOR_PLAYER/VERSION_CONFLICT/NOT_YOUR_TURN validation throws above.
+                GameResponse timedOut = finisher.finish(entity, player.opponent(), "TIMEOUT");
+                idempotencyRecords.saveAndFlush(new IdempotencyRecordEntity(
+                        UUID.randomUUID(), id, idempotencyKey, fingerprint, writeJson(timedOut), timeoutCheckNow));
+                return timedOut;
+            }
+            elapsedMs = Duration.between(entity.getTurnStartedAt(), timeoutCheckNow).toMillis();
+            remainingBefore = whiteToMove ? entity.getWhiteRemainingMs() : entity.getBlackRemainingMs();
+        }
+        long remainingAfter = remainingBefore - elapsedMs;
+
         GameState nextState = GameEngine.restore(currentState)
                 .apply(new GameAction(request.type(), request.from(), request.to()));
 
@@ -300,6 +338,18 @@ public class GameSessionService {
             idempotencyRecords.saveAndFlush(new IdempotencyRecordEntity(
                     UUID.randomUUID(), id, idempotencyKey, fingerprint, writeJson(finishedResponse), clock.instant()));
             return finishedResponse;
+        }
+
+        if (hasClock) {
+            boolean handoff = nextState.currentPlayer() != currentState.currentPlayer(); // turn passed, not still removing
+            long settledMs = handoff ? remainingAfter + entity.getIncrementMs() : remainingAfter;
+            if (whiteToMove) {
+                entity.settleClock(settledMs, entity.getBlackRemainingMs(), clock.instant(),
+                        handoff ? entity.getBlackRemainingMs() : settledMs);
+            } else {
+                entity.settleClock(entity.getWhiteRemainingMs(), settledMs, clock.instant(),
+                        handoff ? entity.getWhiteRemainingMs() : settledMs);
+            }
         }
 
         entity.updateState(statusOf(nextState), writeJson(nextState), clock.instant());
@@ -335,7 +385,15 @@ public class GameSessionService {
         return new GameResponse(entity.getId(), entity.getVersion(), entity.getWhitePlayer(),
                 entity.getBlackPlayer(), entity.getStatus(), state.phase(), state,
                 List.copyOf(engine.legalPlacements()), legalMoves, List.copyOf(engine.removablePieces()),
-                entity.getCreatedAt(), entity.getUpdatedAt());
+                entity.getCreatedAt(), entity.getUpdatedAt(), clockView(entity));
+    }
+
+    private ClockView clockView(GameSessionEntity entity) {
+        if (entity.getTurnDeadlineAt() == null) {
+            return new ClockView(0, 0, false, clock.instant()); // pre-clock game (WAITING, or pre-M2)
+        }
+        return new ClockView(entity.getWhiteRemainingMs(), entity.getBlackRemainingMs(),
+                "IN_PROGRESS".equals(entity.getStatus()), clock.instant());
     }
 
     private GameState readState(GameSessionEntity entity) {
