@@ -2,6 +2,11 @@ package io.github.hannnz1.morris.backend.api;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hannnz1.morris.backend.api.PlayerApiDtos.CreatePlayerRequest;
+import io.github.hannnz1.morris.backend.persistence.GameSessionEntity;
+import io.github.hannnz1.morris.backend.persistence.GameSessionRepository;
+import io.github.hannnz1.morris.backend.persistence.PlayerEntity;
+import io.github.hannnz1.morris.backend.persistence.PlayerRepository;
+import io.github.hannnz1.morris.backend.service.GameSessionService;
 import io.github.hannnz1.morris.backend.service.PlayerService;
 import io.github.hannnz1.morris.backend.service.TokenService;
 import io.github.hannnz1.morris.backend.support.MutableClock;
@@ -15,6 +20,7 @@ import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Primary;
 import org.springframework.http.*;
+import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -44,6 +50,10 @@ class RematchIntegrationTest extends PostgresIntegrationTest {
     @Autowired private ObjectMapper mapper;
     @Autowired private PlayerService playerService;
     @Autowired private TokenService tokenService;
+    @Autowired private GameSessionService gameSessions;
+    @Autowired private GameSessionRepository games;
+    @Autowired private PlayerRepository players;
+    @Autowired private JdbcTemplate jdbc;
 
     @Test
     void acceptingARematchOfferCreatesANewGameWithColorsSwapped() {
@@ -119,6 +129,68 @@ class RematchIntegrationTest extends PostgresIntegrationTest {
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
         assertThat(response.getBody().get("code")).isEqualTo("GAME_NOT_ACTIVE");
+    }
+
+    @Test
+    void acceptingIsBlockedWhenAPlayerHasTooManyActiveGamesAndTheOriginalOfferIsUnchanged() {
+        var white = createPlayer("Han");
+        var black = createPlayer("Zhu");
+        var game = createAndJoinAndFinishByResignation(white, black);
+
+        rematch(game.id(), white.token(), "OFFER");
+
+        // Seed 5 active (WAITING_FOR_PLAYER) games for black, straight through
+        // GameSessionService.createForPlayer (no HTTP, no per-IP/per-player rate limit concerns -
+        // same pattern as GameSessionServiceActiveGameLimitTest), so black is already at the cap
+        // when the ACCEPT below tries to seat them in a 6th (the rematch) game.
+        PlayerEntity blackEntity = playerEntityFor(black);
+        PlayerEntity whiteEntity = playerEntityFor(white);
+        for (int i = 0; i < 5; i++) {
+            gameSessions.createForPlayer(blackEntity, "rematch-cap-seed-" + i, null);
+        }
+
+        var response = rematch(game.id(), black.token(), "ACCEPT");
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(response.getBody().get("code")).isEqualTo("TOO_MANY_ACTIVE_GAMES");
+
+        // The original game's pending OFFER is untouched - spec M2.6's "旧对局的 OFFER 保持不变" -
+        // and no rematch game was ever linked, since the whole method rolled back.
+        GameSessionEntity original = games.findById(game.id()).orElseThrow();
+        assertThat(original.getRematchOfferedBy()).isEqualTo("WHITE");
+        assertThat(original.getRematchGameId()).isNull();
+
+        // No extra IN_PROGRESS game with the colors swapped (white<->black) was created for the
+        // two players - the cap check ran, and threw, before any such row could be written.
+        boolean swappedGameExists = games.findAll().stream()
+                .anyMatch(g -> "IN_PROGRESS".equals(g.getStatus())
+                        && blackEntity.getId().equals(g.getWhitePlayerId())
+                        && whiteEntity.getId().equals(g.getBlackPlayerId()));
+        assertThat(swappedGameExists).isFalse();
+    }
+
+    @Test
+    void aRematchOfAPreClockGameFallsBackToTheDefaultTimeControl() {
+        var white = createPlayer("Han");
+        var black = createPlayer("Zhu");
+        var game = createAndJoinAndFinishByResignation(white, black);
+
+        // Simulate a finished game from before the clock existed: base_ms/increment_ms are NULL.
+        jdbc.update("UPDATE game_sessions SET base_ms = NULL, increment_ms = NULL WHERE id = ?", game.id());
+
+        rematch(game.id(), white.token(), "OFFER");
+        var accepted = rematch(game.id(), black.token(), "ACCEPT");
+
+        UUID newGameId = UUID.fromString((String) accepted.getBody().get("rematchGameId"));
+        var newGame = rest.getForEntity(url("/api/v1/games/" + newGameId), Map.class).getBody();
+        @SuppressWarnings("unchecked")
+        Map<String, Object> clockView = (Map<String, Object>) newGame.get("clock");
+        assertThat(((Number) clockView.get("whiteMs")).longValue()).isEqualTo(5 * 60_000L);
+        assertThat(((Number) clockView.get("blackMs")).longValue()).isEqualTo(5 * 60_000L);
+    }
+
+    private PlayerEntity playerEntityFor(TestPlayer player) {
+        return players.findByTokenHash(tokenService.hash(player.token())).orElseThrow();
     }
 
     private ResponseEntity<Map> rematch(UUID gameId, String token, String action) {
