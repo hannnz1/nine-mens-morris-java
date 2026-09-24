@@ -30,4 +30,17 @@ class FlywayMigrationTest extends PostgresIntegrationTest {
             }
         }
     }
+
+    @Test
+    void migratesClockAndResultColumnsOnStartup() throws Exception {
+        try (Connection connection = dataSource.getConnection()) {
+            DatabaseMetaData metadata = connection.getMetaData();
+            try (ResultSet columns = metadata.getColumns(null, null, "game_sessions", "turn_deadline_at")) {
+                assertThat(columns.next()).as("game_sessions.turn_deadline_at exists after V3").isTrue();
+            }
+            try (ResultSet tables = metadata.getTables(null, null, "system_heartbeat", null)) {
+                assertThat(tables.next()).as("system_heartbeat table exists after V3").isTrue();
+            }
+        }
+    }
 }

@@ -59,6 +59,48 @@ public class GameSessionEntity {
     @JdbcTypeCode(SqlTypes.CHAR)
     private String roomCode;
 
+    @Column(name = "base_ms")
+    private Integer baseMs;
+
+    @Column(name = "increment_ms")
+    private Integer incrementMs;
+
+    @Column(name = "white_remaining_ms")
+    private Long whiteRemainingMs;
+
+    @Column(name = "black_remaining_ms")
+    private Long blackRemainingMs;
+
+    @Column(name = "turn_started_at")
+    private Instant turnStartedAt;
+
+    @Column(name = "turn_deadline_at")
+    private Instant turnDeadlineAt;
+
+    @Column(name = "result_winner", length = 5)
+    private String resultWinner;
+
+    @Column(name = "result_reason", length = 20)
+    private String resultReason;
+
+    @Column(name = "draw_offered_by", length = 5)
+    private String drawOfferedBy;
+
+    @Column(name = "white_draw_offers", nullable = false)
+    private short whiteDrawOffers;
+
+    @Column(name = "black_draw_offers", nullable = false)
+    private short blackDrawOffers;
+
+    @Column(name = "rematch_offered_by", length = 5)
+    private String rematchOfferedBy;
+
+    @Column(name = "rematch_game_id")
+    private UUID rematchGameId;
+
+    @Column(name = "finished_at")
+    private Instant finishedAt;
+
     protected GameSessionEntity() {
     }
 
@@ -148,5 +190,78 @@ public class GameSessionEntity {
 
     public void assignRoomCode(String roomCode) {
         this.roomCode = roomCode;
+    }
+
+    public Integer getBaseMs() {
+        return baseMs;
+    }
+
+    public Integer getIncrementMs() {
+        return incrementMs;
+    }
+
+    public Long getWhiteRemainingMs() {
+        return whiteRemainingMs;
+    }
+
+    public Long getBlackRemainingMs() {
+        return blackRemainingMs;
+    }
+
+    public Instant getTurnStartedAt() {
+        return turnStartedAt;
+    }
+
+    public Instant getTurnDeadlineAt() {
+        return turnDeadlineAt;
+    }
+
+    public String getResultWinner() {
+        return resultWinner;
+    }
+
+    public String getResultReason() {
+        return resultReason;
+    }
+
+    public String getDrawOfferedBy() {
+        return drawOfferedBy;
+    }
+
+    public short getWhiteDrawOffers() {
+        return whiteDrawOffers;
+    }
+
+    public short getBlackDrawOffers() {
+        return blackDrawOffers;
+    }
+
+    public String getRematchOfferedBy() {
+        return rematchOfferedBy;
+    }
+
+    public UUID getRematchGameId() {
+        return rematchGameId;
+    }
+
+    public Instant getFinishedAt() {
+        return finishedAt;
+    }
+
+    public void finish(String status, String resultWinner, String resultReason, Instant finishedAt) {
+        this.status = status;
+        this.resultWinner = resultWinner;
+        this.resultReason = resultReason;
+        this.finishedAt = finishedAt;
+        this.updatedAt = finishedAt;
+    }
+
+    public void startClock(int baseMs, int incrementMs, Instant now) {
+        this.baseMs = baseMs;
+        this.incrementMs = incrementMs;
+        this.whiteRemainingMs = (long) baseMs;
+        this.blackRemainingMs = (long) baseMs;
+        this.turnStartedAt = now;
+        this.turnDeadlineAt = now.plusSeconds(30); // first-move grace, spec M2.3
     }
 }
