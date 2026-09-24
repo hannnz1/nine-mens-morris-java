@@ -105,6 +105,40 @@ class DrawDetectionTest {
         assertThat(state.positionCounts()).isEmpty();
     }
 
+    @Test
+    void captureRecordsThePostCapturePositionForRepetitionCounting() {
+        // Regression for a review finding: GameEngine.remove() used to skip evaluateDraw()
+        // entirely, so the position immediately after a capture was never added to
+        // positionCounts. If that exact post-capture position later recurred via non-capturing
+        // moves, it would take a 4th real occurrence (instead of 3) to trigger DRAW_REPETITION -
+        // diverging from spec ("每步之后计数加 1", no exception for a capturing ply).
+        // White already holds the (A1, D1, G1) outer-ring mill (removalPending = true); Black
+        // starts with 4 pieces (B2, F2, F6, B6 - none of which are in a mill, per
+        // BoardTopology.mills(), since each of the four middle-ring mills needs one of
+        // D2/F4/D6/B4, which Black doesn't hold) so that after one is captured, Black still has
+        // 3 pieces left (not a loss) and can fly (so always has legal moves).
+        EnumMap<BoardPosition, Piece> board = new EnumMap<>(BoardPosition.class);
+        for (BoardPosition position : BoardPosition.values()) board.put(position, Piece.EMPTY);
+        board.put(BoardPosition.A1, Piece.WHITE);
+        board.put(BoardPosition.D1, Piece.WHITE);
+        board.put(BoardPosition.G1, Piece.WHITE);
+        board.put(BoardPosition.G7, Piece.WHITE);
+        board.put(BoardPosition.B2, Piece.BLACK);
+        board.put(BoardPosition.F2, Piece.BLACK);
+        board.put(BoardPosition.F6, Piece.BLACK);
+        board.put(BoardPosition.B6, Piece.BLACK);
+
+        GameState removalPendingState = new GameState(board, Player.WHITE, 0, 0, true, null, 0, Map.of(), 0, null);
+        GameEngine engine = GameEngine.restore(removalPendingState);
+
+        GameState state = engine.apply(GameAction.remove(BoardPosition.B2));
+
+        assertThat(state.winner()).isNull();
+        assertThat(state.drawReason()).isNull();
+        assertThat(state.positionCounts()).hasSize(1);
+        assertThat(state.positionCounts().values()).containsExactly(1);
+    }
+
     private static GameEngine minimalMovingPhasePosition() {
         EnumMap<BoardPosition, Piece> board = new EnumMap<>(BoardPosition.class);
         for (BoardPosition position : BoardPosition.values()) {

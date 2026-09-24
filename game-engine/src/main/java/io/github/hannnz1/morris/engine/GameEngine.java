@@ -159,10 +159,18 @@ public final class GameEngine {
         if (allPiecesPlaced()
                 && (piecesOnBoard(currentPlayer) < 3 || legalMovesFor(currentPlayer).isEmpty())) {
             winner = playerWhoMoved;
+            return;
         }
-        // pliesSinceRemoval already reset above; a capture cannot also be the move that completes
-        // a threefold repetition of the position it just changed, so only the no-capture check
-        // would ever apply here, and it can't trigger the same ply it was reset - no evaluateDraw().
+        // pliesSinceRemoval was already reset above (a capture always resets the no-capture
+        // counter); evaluateDraw() still needs to run here so the post-capture position gets
+        // recorded in positionCounts (starting from a fresh count of 1) - otherwise a position
+        // reached right after a capture would never be counted at all, and a genuinely-repeated
+        // position would need a 4th occurrence instead of 3 to trigger DRAW_REPETITION. This can't
+        // itself trigger DRAW_REPETITION on this ply (first occurrence), but DRAW_NO_CAPTURE also
+        // can't fire here since pliesSinceRemoval was just reset to 0.
+        if (allPiecesPlaced()) {
+            evaluateDraw();
+        }
     }
 
     private void completePlacementOrMove(BoardPosition destination) {
