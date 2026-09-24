@@ -256,14 +256,14 @@ public class GameSessionService {
         return toResponse(entity, readState(entity));
     }
 
-    // noRollbackFor = ApiException.class: defensive per M2.3's "先提交判负,再返回错误" requirement -
-    // a write must never be undone by an ApiException thrown later in the same call. The
-    // clock-timeout path below currently commits the TIMEOUT verdict and returns it directly rather
-    // than throwing (see the comment at that branch for why), so this doesn't fire on that path
-    // today, but it keeps the method safe against ANY future ApiException thrown after a write
-    // (including this method's other throws, none of which currently write anything first).
-    @Transactional(isolation = Isolation.READ_COMMITTED, noRollbackFor = ApiException.class)
-    public GameResponse performAction(UUID id, String bearerToken, String legacySeatToken, String idempotencyKey,
+    // Per spec M2.3: this method never throws to signal a clock-timeout rejection - it returns an
+    // ActionOutcome (rejectedByTimeout = true on that path) after committing the TIMEOUT verdict via
+    // GameFinisher.finish, entirely inside this method's own transaction. GameController.action is
+    // the one that turns rejectedByTimeout into an HTTP 409 GAME_NOT_ACTIVE, by which point this
+    // transaction has already committed - so there is no throw-after-write path in this method that
+    // would need noRollbackFor.
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public ActionOutcome performAction(UUID id, String bearerToken, String legacySeatToken, String idempotencyKey,
                                       ActionRequest request) {
         validateIdempotencyKey(idempotencyKey);
         // Mirrors SeatResolver.resolve's own branch-selection predicate exactly (usable: non-blank
@@ -283,7 +283,9 @@ public class GameSessionService {
                 throw new ApiException(HttpStatus.CONFLICT, "IDEMPOTENCY_KEY_REUSED",
                         "This idempotency key was already used for a different request");
             }
-            return readJson(previous.get().getResponseJson(), GameResponse.class);
+            // The stored JSON is an ActionOutcome (not a bare GameResponse) precisely so a retried
+            // request after a timeout rejection replays as rejectedByTimeout = true too, not a 200.
+            return readJson(previous.get().getResponseJson(), ActionOutcome.class);
         }
 
         if (entity.getBlackPlayer() == null) {
@@ -311,16 +313,16 @@ public class GameSessionService {
             Instant timeoutCheckNow = clock.instant();
             if (!timeoutCheckNow.isBefore(entity.getTurnDeadlineAt())) {
                 // The mover's own clock had already reached zero before this action arrived: the
-                // action is rejected and the game ends in a loss for the mover, exactly as if the
-                // background TimeoutScanner (Task 6) had caught it first. finisher.finish commits
-                // the verdict; ChessClockTest.aMoveArrivingExactlyWhenTimeReachesZeroIsRejectedAsATimeout
-                // asserts this call returns that finished response directly (status BLACK_WON) rather
-                // than throwing - mirroring the mill/draw terminal branch below, not the
-                // WAITING_FOR_PLAYER/VERSION_CONFLICT/NOT_YOUR_TURN validation throws above.
+                // action is never applied, and the game ends in a loss for the mover, exactly as if
+                // the background TimeoutScanner (Task 6) had caught it first. finisher.finish commits
+                // the verdict inside this transaction; rejectedByTimeout = true tells
+                // GameController.action to turn this into an HTTP 409 GAME_NOT_ACTIVE, per spec
+                // M2.3's "服务方法返回一个「结果对象」,由 Controller 转换为 409 响应,而不是在事务内抛异常".
                 GameResponse timedOut = finisher.finish(entity, player.opponent(), "TIMEOUT");
+                ActionOutcome outcome = new ActionOutcome(timedOut, true);
                 idempotencyRecords.saveAndFlush(new IdempotencyRecordEntity(
-                        UUID.randomUUID(), id, idempotencyKey, fingerprint, writeJson(timedOut), timeoutCheckNow));
-                return timedOut;
+                        UUID.randomUUID(), id, idempotencyKey, fingerprint, writeJson(outcome), timeoutCheckNow));
+                return outcome;
             }
             elapsedMs = Duration.between(entity.getTurnStartedAt(), timeoutCheckNow).toMillis();
             remainingBefore = whiteToMove ? entity.getWhiteRemainingMs() : entity.getBlackRemainingMs();
@@ -335,9 +337,10 @@ public class GameSessionService {
             entity = games.saveAndFlush(entity);
             GameResponse finishedResponse = finisher.finish(entity, nextState.winner(),
                     nextState.winner() != null ? engineWinReason(nextState) : nextState.drawReason());
+            ActionOutcome outcome = new ActionOutcome(finishedResponse, false);
             idempotencyRecords.saveAndFlush(new IdempotencyRecordEntity(
-                    UUID.randomUUID(), id, idempotencyKey, fingerprint, writeJson(finishedResponse), clock.instant()));
-            return finishedResponse;
+                    UUID.randomUUID(), id, idempotencyKey, fingerprint, writeJson(outcome), clock.instant()));
+            return outcome;
         }
 
         if (hasClock) {
@@ -355,11 +358,12 @@ public class GameSessionService {
         entity.updateState(statusOf(nextState), writeJson(nextState), clock.instant());
         entity = games.saveAndFlush(entity);
         GameResponse response = toResponse(entity, nextState);
+        ActionOutcome outcome = new ActionOutcome(response, false);
 
         idempotencyRecords.saveAndFlush(new IdempotencyRecordEntity(
-                UUID.randomUUID(), id, idempotencyKey, fingerprint, writeJson(response), clock.instant()));
+                UUID.randomUUID(), id, idempotencyKey, fingerprint, writeJson(outcome), clock.instant()));
         publishAfterCommit(id, response);
-        return response;
+        return outcome;
     }
 
     private String engineWinReason(GameState state) {

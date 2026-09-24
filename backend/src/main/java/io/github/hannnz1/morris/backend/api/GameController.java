@@ -132,7 +132,15 @@ public class GameController {
             @RequestHeader(value = "X-Player-Token", required = false) String legacyToken,
             @RequestHeader("Idempotency-Key") String idempotencyKey,
             @Valid @RequestBody ActionRequest request) {
-        return gameSessions.performAction(id, bearerToken(authorization), legacyToken, idempotencyKey, request);
+        var outcome = gameSessions.performAction(id, bearerToken(authorization), legacyToken, idempotencyKey, request);
+        // Per spec M2.3, the service already committed the TIMEOUT verdict inside its own
+        // transaction (it never throws to signal this); only here, after that commit, do we turn a
+        // clock-timeout rejection into an HTTP 409. The finished game itself still reaches the
+        // client via the WebSocket broadcast GameFinisher.finish triggers.
+        if (outcome.rejectedByTimeout()) {
+            throw new ApiException(HttpStatus.CONFLICT, "GAME_NOT_ACTIVE", "This player's time expired");
+        }
+        return outcome.game();
     }
 
     private String bearerToken(String authorizationHeader) {

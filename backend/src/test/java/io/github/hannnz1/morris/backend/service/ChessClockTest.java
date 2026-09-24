@@ -67,13 +67,14 @@ class ChessClockTest extends PostgresIntegrationTest {
         var game = startedGame("5+3");
         ((MutableClock) clock).advance(Duration.ofSeconds(10));
 
-        var response = gameSessions.performAction(game.id(), whiteToken, null, "act-1",
+        var outcome = gameSessions.performAction(game.id(), whiteToken, null, "act-1",
                 new ActionRequest(ActionType.PLACE, null, BoardPosition.A1, game.version()));
 
         // White used 10s of a 300s budget, then gains the 3s increment on handing the turn over:
         // 300_000 - 10_000 + 3_000 = 293_000.
-        assertThat(response.clock().whiteMs()).isEqualTo(293_000L);
-        assertThat(response.clock().blackMs()).isEqualTo(300_000L);
+        assertThat(outcome.rejectedByTimeout()).isFalse();
+        assertThat(outcome.game().clock().whiteMs()).isEqualTo(293_000L);
+        assertThat(outcome.game().clock().blackMs()).isEqualTo(300_000L);
     }
 
     @Test
@@ -81,10 +82,11 @@ class ChessClockTest extends PostgresIntegrationTest {
         var game = startedGame("5+3");
         ((MutableClock) clock).advance(Duration.ofMillis(300_000)); // exactly the full budget, not a millisecond less
 
-        var response = gameSessions.performAction(game.id(), whiteToken, null, "act-1",
+        var outcome = gameSessions.performAction(game.id(), whiteToken, null, "act-1",
                 new ActionRequest(ActionType.PLACE, null, BoardPosition.A1, game.version()));
 
-        assertThat(response.status()).isEqualTo("BLACK_WON");
+        assertThat(outcome.rejectedByTimeout()).isTrue();
+        assertThat(outcome.game().status()).isEqualTo("BLACK_WON");
     }
 
     private PlayerEntity createPlayer(String nickname) {
