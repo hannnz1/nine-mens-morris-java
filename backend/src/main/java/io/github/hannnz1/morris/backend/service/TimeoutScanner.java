@@ -3,6 +3,7 @@ package io.github.hannnz1.morris.backend.service;
 import io.github.hannnz1.morris.backend.persistence.GameSessionEntity;
 import io.github.hannnz1.morris.backend.persistence.GameSessionRepository;
 import io.github.hannnz1.morris.engine.GameResult;
+import org.springframework.data.domain.Limit;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -34,6 +35,8 @@ import java.util.UUID;
 public class TimeoutScanner {
 
     private static final org.slf4j.Logger LOGGER = org.slf4j.LoggerFactory.getLogger(TimeoutScanner.class);
+    // Spec section 2's "模式 B": cap each scan tick's candidate selection at 100.
+    private static final Limit CANDIDATE_LIMIT = Limit.of(100);
 
     private final GameSessionRepository games;
     private final GameFinisher finisher;
@@ -63,7 +66,7 @@ public class TimeoutScanner {
     // Package-visible: called directly by tests to avoid sleeping through the real @Scheduled
     // interval, and by scan() above once startup compensation has completed.
     void scanOnce() {
-        List<UUID> candidateIds = games.findTimedOutCandidateIds(clock.instant());
+        List<UUID> candidateIds = games.findTimedOutCandidateIds(clock.instant(), CANDIDATE_LIMIT);
         for (UUID id : candidateIds) {
             try {
                 transactionTemplate.executeWithoutResult(status -> finishOneIfStillTimedOut(id));

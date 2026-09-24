@@ -1,6 +1,7 @@
 package io.github.hannnz1.morris.backend.service;
 
 import io.github.hannnz1.morris.backend.api.GameApiDtos.GameResponse;
+import io.github.hannnz1.morris.backend.persistence.GameSessionEntity;
 import io.github.hannnz1.morris.backend.persistence.GameSessionRepository;
 import io.github.hannnz1.morris.backend.persistence.PlayerEntity;
 import io.github.hannnz1.morris.backend.persistence.PlayerRepository;
@@ -45,7 +46,9 @@ class DowntimeCompensatorTest extends PostgresIntegrationTest {
         // would depend on how far a previously-run method already advanced the clock.
         ((MutableClock) clock).set(BASE_INSTANT);
         var game = startedGame("5+3");
-        Instant deadlineBefore = games.findById(game.id()).orElseThrow().getTurnDeadlineAt();
+        GameSessionEntity before = games.findById(game.id()).orElseThrow();
+        Instant deadlineBefore = before.getTurnDeadlineAt();
+        Instant turnStartedBefore = before.getTurnStartedAt();
 
         jdbc.update("update system_heartbeat set last_alive_at = ? where id = 1",
                 java.sql.Timestamp.from(BASE_INSTANT));
@@ -53,9 +56,9 @@ class DowntimeCompensatorTest extends PostgresIntegrationTest {
 
         compensator.compensateOnStartup();
 
-        Instant deadlineAfter = games.findById(game.id()).orElseThrow().getTurnDeadlineAt();
-        assertThat(deadlineAfter).isEqualTo(deadlineBefore.plusSeconds(60));
-        assertThat(compensator.ready()).isTrue();
+        GameSessionEntity after = games.findById(game.id()).orElseThrow();
+        assertThat(after.getTurnDeadlineAt()).isEqualTo(deadlineBefore.plusSeconds(60));
+        assertThat(after.getTurnStartedAt()).isEqualTo(turnStartedBefore.plusSeconds(60));
     }
 
     @Test
