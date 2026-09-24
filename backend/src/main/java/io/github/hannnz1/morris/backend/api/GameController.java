@@ -143,6 +143,20 @@ public class GameController {
         return outcome.game();
     }
 
+    @PostMapping("/{id}/resign")
+    public GameResponse resign(@PathVariable("id") UUID id,
+                               @RequestHeader(value = "Authorization", required = false) String authorization,
+                               @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
+        return gameSessions.resign(id, bearerToken(authorization), idempotencyKey);
+    }
+
+    @PostMapping("/{id}/cancel")
+    public GameResponse cancel(@PathVariable("id") UUID id,
+                               @RequestHeader(value = "Authorization", required = false) String authorization,
+                               @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
+        return gameSessions.cancel(id, bearerToken(authorization), idempotencyKey);
+    }
+
     private String bearerToken(String authorizationHeader) {
         return (authorizationHeader != null && authorizationHeader.startsWith("Bearer "))
                 ? authorizationHeader.substring("Bearer ".length())

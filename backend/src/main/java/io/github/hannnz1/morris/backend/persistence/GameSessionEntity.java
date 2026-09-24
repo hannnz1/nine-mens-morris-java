@@ -283,4 +283,12 @@ public class GameSessionEntity {
         this.turnStartedAt = turnStartedAt;
         this.turnDeadlineAt = turnStartedAt.plusMillis(nextDeadlineBudgetMs);
     }
+
+    // Deliberately NOT GameFinisher: a WAITING_FOR_PLAYER game that is cancelled never started
+    // (IN_PROGRESS), so it has no result to record - result_winner/result_reason/finished_at stay
+    // null, matching a game that was simply never played rather than one that finished.
+    public void cancel(Instant now) {
+        this.status = "CANCELLED";
+        this.updatedAt = now;
+    }
 }

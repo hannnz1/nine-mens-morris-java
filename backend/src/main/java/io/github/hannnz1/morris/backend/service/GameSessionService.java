@@ -47,7 +47,7 @@ public class GameSessionService {
 
     private static final org.slf4j.Logger LOGGER = org.slf4j.LoggerFactory.getLogger(GameSessionService.class);
     private static final List<String> ACTIVE_STATUSES = List.of("WAITING_FOR_PLAYER", "IN_PROGRESS");
-    private static final List<String> FINISHED_STATUSES = List.of("WHITE_WON", "BLACK_WON", "DRAWN", "ABORTED");
+    private static final List<String> FINISHED_STATUSES = List.of("WHITE_WON", "BLACK_WON", "DRAWN", "ABORTED", "CANCELLED");
 
     private final GameSessionRepository games;
     private final IdempotencyRecordRepository idempotencyRecords;
@@ -402,6 +402,75 @@ public class GameSessionService {
                 UUID.randomUUID(), id, idempotencyKey, fingerprint, writeJson(outcome), clock.instant()));
         publishAfterCommit(id, response);
         return outcome;
+    }
+
+    // Resign accepts only the Bearer credential (legacySeatToken passed as null to SeatResolver):
+    // pre-M1 anonymous games have no player ids, so those callers get 403 INVALID_PLAYER_TOKEN,
+    // per the plan's Global Constraints. The idempotency fingerprint's ":resign:" segment is a
+    // discriminator that keeps a key reused across /resign, /cancel, or /actions from ever
+    // replaying the wrong stored shape - it fails the fingerprint match instead.
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public GameResponse resign(UUID id, String bearerToken, String idempotencyKey) {
+        validateIdempotencyKey(idempotencyKey);
+        String fingerprint = tokens.hash(bearerToken + ":resign:" + idempotencyKey);
+        GameSessionEntity entity = findGameForUpdate(id);
+        Player player = seatResolver.resolve(entity, bearerToken, null);
+
+        var previous = idempotencyRecords.findByGameIdAndIdempotencyKey(id, idempotencyKey);
+        if (previous.isPresent()) {
+            if (!previous.get().getRequestFingerprint().equals(fingerprint)) {
+                throw new ApiException(HttpStatus.CONFLICT, "IDEMPOTENCY_KEY_REUSED",
+                        "This idempotency key was already used for a different request");
+            }
+            return readJson(previous.get().getResponseJson(), GameResponse.class);
+        }
+        if (!"IN_PROGRESS".equals(entity.getStatus())) {
+            throw new ApiException(HttpStatus.CONFLICT, "GAME_NOT_ACTIVE", "The game is not active");
+        }
+
+        // GameFinisher.finish already commits (saveAndFlush) and schedules the WebSocket broadcast
+        // after commit itself - resign must not go through any other write path per the plan's
+        // Global Constraints.
+        GameResponse response = finisher.finish(entity, player.opponent(), "RESIGN");
+        idempotencyRecords.saveAndFlush(new IdempotencyRecordEntity(
+                UUID.randomUUID(), id, idempotencyKey, fingerprint, writeJson(response), clock.instant()));
+        return response;
+    }
+
+    // Cancel accepts only the Bearer credential (legacySeatToken passed as null), same as resign.
+    // Only the creator (WHITE) may cancel, and only while the game is still WAITING_FOR_PLAYER -
+    // once black has joined, the game must be resigned or played out, not cancelled. Cancel
+    // deliberately does NOT go through GameFinisher: a cancelled game never reached IN_PROGRESS, so
+    // it has no result to record (see GameSessionEntity.cancel).
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public GameResponse cancel(UUID id, String bearerToken, String idempotencyKey) {
+        validateIdempotencyKey(idempotencyKey);
+        String fingerprint = tokens.hash(bearerToken + ":cancel:" + idempotencyKey);
+        GameSessionEntity entity = findGameForUpdate(id);
+        Player player = seatResolver.resolve(entity, bearerToken, null);
+        if (player != Player.WHITE) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "INVALID_PLAYER_TOKEN", "Only the creator can cancel");
+        }
+
+        var previous = idempotencyRecords.findByGameIdAndIdempotencyKey(id, idempotencyKey);
+        if (previous.isPresent()) {
+            if (!previous.get().getRequestFingerprint().equals(fingerprint)) {
+                throw new ApiException(HttpStatus.CONFLICT, "IDEMPOTENCY_KEY_REUSED",
+                        "This idempotency key was already used for a different request");
+            }
+            return readJson(previous.get().getResponseJson(), GameResponse.class);
+        }
+        if (!"WAITING_FOR_PLAYER".equals(entity.getStatus())) {
+            throw new ApiException(HttpStatus.CONFLICT, "GAME_NOT_ACTIVE", "The game already has a second player");
+        }
+
+        entity.cancel(clock.instant());
+        entity = games.saveAndFlush(entity);
+        GameResponse response = toResponse(entity, readState(entity));
+        idempotencyRecords.saveAndFlush(new IdempotencyRecordEntity(
+                UUID.randomUUID(), id, idempotencyKey, fingerprint, writeJson(response), clock.instant()));
+        publishAfterCommit(id, response);
+        return response;
     }
 
     private String engineWinReason(GameState state) {
