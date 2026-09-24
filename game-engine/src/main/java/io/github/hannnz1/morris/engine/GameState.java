@@ -11,7 +11,10 @@ public record GameState(
         int blackPiecesToPlace,
         boolean removalPending,
         Player winner,
-        long turnNumber
+        long turnNumber,
+        Map<String, Integer> positionCounts,
+        int pliesSinceRemoval,
+        String drawReason
 ) {
     public GameState {
         if (board == null || currentPlayer == null) {
@@ -24,6 +27,9 @@ public record GameState(
         if (turnNumber < 0) {
             throw new IllegalArgumentException("Turn number cannot be negative");
         }
+        if (pliesSinceRemoval < 0) {
+            throw new IllegalArgumentException("Plies since removal cannot be negative");
+        }
 
         EnumMap<BoardPosition, Piece> copy = new EnumMap<>(BoardPosition.class);
         for (BoardPosition position : BoardPosition.values()) {
@@ -34,8 +40,12 @@ public record GameState(
             copy.put(position, piece);
         }
         board = Collections.unmodifiableMap(copy);
+        // A pre-M2 state_json has no "positionCounts" property at all; Jackson's record
+        // deserialization then passes null here rather than failing. Default it, don't reject it -
+        // an in-flight game from before this migration must still load.
+        positionCounts = positionCounts == null ? Map.of() : Map.copyOf(positionCounts);
 
-        if (winner != null && removalPending) {
+        if ((winner != null || drawReason != null) && removalPending) {
             throw new IllegalArgumentException("A completed game cannot await removal");
         }
     }
@@ -49,7 +59,7 @@ public record GameState(
     }
 
     public GamePhase phase() {
-        if (winner != null) {
+        if (winner != null || drawReason != null) {
             return GamePhase.GAME_OVER;
         }
         if (removalPending) {
@@ -61,4 +71,3 @@ public record GameState(
         return piecesOnBoard(currentPlayer) == 3 ? GamePhase.FLYING : GamePhase.MOVING;
     }
 }
-

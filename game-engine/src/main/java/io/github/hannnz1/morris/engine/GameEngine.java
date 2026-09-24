@@ -16,6 +16,9 @@ public final class GameEngine {
     private boolean removalPending;
     private Player winner;
     private long turnNumber;
+    private final Map<String, Integer> positionCounts;
+    private int pliesSinceRemoval;
+    private String drawReason;
 
     private GameEngine(GameState state) {
         this.board = new EnumMap<>(state.board());
@@ -25,6 +28,9 @@ public final class GameEngine {
         this.removalPending = state.removalPending();
         this.winner = state.winner();
         this.turnNumber = state.turnNumber();
+        this.positionCounts = new java.util.HashMap<>(state.positionCounts());
+        this.pliesSinceRemoval = state.pliesSinceRemoval();
+        this.drawReason = state.drawReason();
     }
 
     public static GameEngine newGame() {
@@ -32,7 +38,7 @@ public final class GameEngine {
         for (BoardPosition position : BoardPosition.values()) {
             emptyBoard.put(position, Piece.EMPTY);
         }
-        return new GameEngine(new GameState(emptyBoard, Player.WHITE, 9, 9, false, null, 0));
+        return new GameEngine(new GameState(emptyBoard, Player.WHITE, 9, 9, false, null, 0, Map.of(), 0, null));
     }
 
     public static GameEngine restore(GameState state) {
@@ -41,14 +47,14 @@ public final class GameEngine {
 
     public GameState state() {
         return new GameState(board, currentPlayer, whitePiecesToPlace, blackPiecesToPlace,
-                removalPending, winner, turnNumber);
+                removalPending, winner, turnNumber, positionCounts, pliesSinceRemoval, drawReason);
     }
 
     public GameState apply(GameAction action) {
         if (action == null) {
             throw new GameRuleException("Action is required");
         }
-        if (winner != null) {
+        if (winner != null || drawReason != null) {
             throw new GameRuleException("The game is already over");
         }
         if (removalPending && action.type() != ActionType.REMOVE) {
@@ -67,7 +73,7 @@ public final class GameEngine {
     }
 
     public Set<BoardPosition> legalPlacements() {
-        if (winner != null || removalPending || piecesToPlace(currentPlayer) == 0) {
+        if (winner != null || drawReason != null || removalPending || piecesToPlace(currentPlayer) == 0) {
             return Set.of();
         }
         EnumSet<BoardPosition> targets = EnumSet.noneOf(BoardPosition.class);
@@ -80,14 +86,14 @@ public final class GameEngine {
     }
 
     public Map<BoardPosition, Set<BoardPosition>> legalMoves() {
-        if (winner != null || removalPending || piecesToPlace(currentPlayer) > 0) {
+        if (winner != null || drawReason != null || removalPending || piecesToPlace(currentPlayer) > 0) {
             return Map.of();
         }
         return legalMovesFor(currentPlayer);
     }
 
     public Set<BoardPosition> removablePieces() {
-        if (!removalPending || winner != null) {
+        if (!removalPending || winner != null || drawReason != null) {
             return Set.of();
         }
 
@@ -140,13 +146,23 @@ public final class GameEngine {
 
         board.put(target, Piece.EMPTY);
         removalPending = false;
+        pliesSinceRemoval = 0; // a capture always resets the no-capture counter, win or not
         Player opponent = currentPlayer.opponent();
         if (allPiecesPlaced() && (piecesOnBoard(opponent) < 3 || legalMovesFor(opponent).isEmpty())) {
             winner = currentPlayer;
             turnNumber++;
             return;
         }
-        finishTurn();
+        Player playerWhoMoved = currentPlayer;
+        currentPlayer = currentPlayer.opponent();
+        turnNumber++;
+        if (allPiecesPlaced()
+                && (piecesOnBoard(currentPlayer) < 3 || legalMovesFor(currentPlayer).isEmpty())) {
+            winner = playerWhoMoved;
+        }
+        // pliesSinceRemoval already reset above; a capture cannot also be the move that completes
+        // a threefold repetition of the position it just changed, so only the no-capture check
+        // would ever apply here, and it can't trigger the same ply it was reset - no evaluateDraw().
     }
 
     private void completePlacementOrMove(BoardPosition destination) {
@@ -164,7 +180,33 @@ public final class GameEngine {
         if (allPiecesPlaced()
                 && (piecesOnBoard(currentPlayer) < 3 || legalMovesFor(currentPlayer).isEmpty())) {
             winner = playerWhoMoved;
+            return;
         }
+        if (allPiecesPlaced()) {
+            pliesSinceRemoval++;
+            evaluateDraw();
+        }
+    }
+
+    private void evaluateDraw() {
+        String key = positionKey();
+        int count = positionCounts.merge(key, 1, Integer::sum);
+        if (count >= 3) {
+            drawReason = "DRAW_REPETITION";
+            return;
+        }
+        if (pliesSinceRemoval >= 50) {
+            drawReason = "DRAW_NO_CAPTURE";
+        }
+    }
+
+    private String positionKey() {
+        StringBuilder key = new StringBuilder(64);
+        for (BoardPosition position : BoardPosition.values()) {
+            key.append(board.get(position).name().charAt(0));
+        }
+        key.append('|').append(currentPlayer).append('|').append(whitePiecesToPlace).append(',').append(blackPiecesToPlace);
+        return key.toString();
     }
 
     private Map<BoardPosition, Set<BoardPosition>> legalMovesFor(Player player) {

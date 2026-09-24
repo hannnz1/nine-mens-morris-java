@@ -86,7 +86,7 @@ class GameEngineTest {
         board.put(BoardPosition.B6, Piece.BLACK);
 
         GameEngine engine = GameEngine.restore(
-                new GameState(board, Player.WHITE, 0, 0, false, null, 18));
+                new GameState(board, Player.WHITE, 0, 0, false, null, 18, Map.of(), 0, null));
 
         assertEquals(GamePhase.FLYING, engine.state().phase());
         assertTrue(engine.legalMoves().get(BoardPosition.A1).contains(BoardPosition.E5));
@@ -110,7 +110,7 @@ class GameEngineTest {
         board.put(BoardPosition.B6, Piece.BLACK);
 
         GameEngine engine = GameEngine.restore(
-                new GameState(board, Player.WHITE, 0, 0, false, null, 18));
+                new GameState(board, Player.WHITE, 0, 0, false, null, 18, Map.of(), 0, null));
 
         assertEquals(GamePhase.MOVING, engine.state().phase());
         assertThrows(GameRuleException.class,
@@ -128,7 +128,7 @@ class GameEngineTest {
         board.put(BoardPosition.B6, Piece.BLACK);
 
         GameEngine engine = GameEngine.restore(
-                new GameState(board, Player.WHITE, 0, 0, true, null, 24));
+                new GameState(board, Player.WHITE, 0, 0, true, null, 24, Map.of(), 0, null));
         engine.apply(GameAction.remove(BoardPosition.B2));
 
         assertEquals(Player.WHITE, engine.state().winner());
