@@ -349,9 +349,134 @@ test('a finished game offers rematch, and shows accept/decline once the opponent
 test('a rematchGameId appearing on the current game navigates into the new game',async()=>{
     const h=harness();h.activate();
     h.run('client.identity={playerId:"p1",nickname:"Alice",clientToken:"x".repeat(43)}; client.session.bearer=true;');
-    h.ctx.fetch=async()=>response(game('cccccccc-cccc-cccc-cccc-cccccccccccc'));
-    h.ctx.next=game(A,2);h.ctx.next.rematchGameId='cccccccc-cccc-cccc-cccc-cccccccccccc';
+    const rematch=game('cccccccc-cccc-cccc-cccc-cccccccccccc');rematch.whitePlayerId='p2';rematch.blackPlayerId='p1';
+    h.ctx.fetch=async()=>response(rematch);
+    h.ctx.next=game(A,2);h.ctx.next.status='WHITE_WON';h.ctx.next.whitePlayerId='p1';h.ctx.next.blackPlayerId='p2';
+    h.ctx.next.rematchGameId='cccccccc-cccc-cccc-cccc-cccccccccccc';
     h.run('applyGame(next,"REST")');
     await new Promise(setImmediate);await new Promise(setImmediate);await new Promise(setImmediate);
     assert.strictEqual(h.run('client.session.gameId'),'cccccccc-cccc-cccc-cccc-cccccccccccc');
+    assert.strictEqual(h.run('client.session.side'),'BLACK'); // colours swap in a rematch
+});
+
+// Final-review C1: sides come from player ids, never nicknames.
+const identityGame=(id,whiteId,blackId)=>{const g=game(id);g.whitePlayer='Sam';g.blackPlayer='Sam';g.whitePlayerId=whiteId;g.blackPlayerId=blackId;return g;};
+test('mySide uses player ids: two identities with the same nickname, viewer is black',()=>{
+    const h=harness();
+    h.run('client.identity={playerId:"black-id",nickname:"Sam",clientToken:"x".repeat(43)};');
+    h.ctx.g=identityGame(A,'white-id','black-id');
+    assert.strictEqual(h.run('mySide(g)'),'BLACK');
+    h.run('client.identity.playerId="white-id"');
+    assert.strictEqual(h.run('mySide(g)'),'WHITE');
+});
+
+test('mySide falls back to the stored session side when the game has no player ids (legacy anonymous)',()=>{
+    const h=harness();h.activate();
+    h.run('client.session.side="BLACK"; client.identity=null;');
+    h.ctx.g=game(A);
+    assert.strictEqual(h.run('mySide(g)'),'BLACK');
+});
+
+test('opening a game from my games as the same-nickname black player enters as BLACK',async()=>{
+    const h=harness();
+    h.run('client.identity={playerId:"black-id",nickname:"Sam",clientToken:"x".repeat(43)};');
+    h.ctx.fetch=async()=>response(identityGame(B,'white-id','black-id'));
+    await h.run('enterMyGame(B_ID)'.replace('B_ID',JSON.stringify(B)));
+    assert.strictEqual(h.run('client.session.side'),'BLACK');
+    assert.strictEqual(JSON.parse(h.storage.get('morris-live-session-v1')).session.side,'BLACK');
+});
+
+test('an identity session saved with the wrong side is corrected from the player ids on the next snapshot',()=>{
+    const h=harness();h.activate();
+    h.run('client.identity={playerId:"black-id",nickname:"Sam",clientToken:"x".repeat(43)}; client.session.bearer=true; client.session.side="WHITE";');
+    h.ctx.next=identityGame(A,'white-id','black-id');h.ctx.next.version=2;
+    h.run('applyGame(next,"REST")');
+    assert.strictEqual(h.run('client.session.side'),'BLACK');
+    assert.strictEqual(JSON.parse(h.storage.get('morris-live-session-v1')).session.side,'BLACK');
+});
+
+// Final-review I1: only IN_PROGRESS is playable; finished games show winner plus reason.
+for (const [status,winner,reason,expected] of [
+    ['BLACK_WON','BLACK','TIMEOUT','黑方胜 · 超时'],
+    ['WHITE_WON','WHITE','RESIGN','白方胜 · 认输'],
+    ['DRAWN',null,'DRAW_REPETITION','和棋 · 三次重复'],
+    ['ABORTED',null,'ABORTED','已放弃 · 首步超时']]) {
+    test(`a ${status}/${reason} game with no engine winner is not interactive and shows "${expected}"`,async()=>{
+        const h=harness();h.activate();
+        h.run(`client.game.status=${JSON.stringify(status)}; client.game.result={winner:${JSON.stringify(winner)},reason:${JSON.stringify(reason)}};
+            client.game.state.winner=null; client.game.state.currentPlayer=client.session.side; renderGame();`);
+        assert.strictEqual(h.run('client.game.state.winner'),null);
+        const buttons=[];h.run('elements.board').querySelectorAll=()=>buttons;
+        for(const p of ['A1','D1'])buttons.push({dataset:{position:p},classList:{toggle(){}},setAttribute(){},disabled:false});
+        h.run('renderBoard()');
+        assert.ok(buttons.every(b=>b.disabled),'every board position must be disabled');
+        assert.strictEqual(h.nodes.get('actionPrompt').textContent,`${expected}，对局结束`);
+        assert.strictEqual(h.nodes.get('currentPlayer').textContent,expected);
+        assert.strictEqual(h.nodes.get('resultReason').hidden,false);
+        assert.strictEqual(h.nodes.get('resultReason').textContent,expected);
+        let requests=0;h.ctx.fetch=async()=>{requests++;return response(game());};
+        await h.run('handlePositionClick("A1")');
+        assert.strictEqual(requests,0);assert.strictEqual(h.run('client.pendingAction'),null);
+    });
+}
+
+test('the turn highlight follows status, not state.winner',()=>{
+    const h=harness();h.activate();
+    const toggles={};h.nodes.set('whiteCard',{classList:{toggle:(c,on)=>{toggles.white=on;}}});
+    h.run('client.game.status="IN_PROGRESS"; client.game.state.currentPlayer="WHITE"; renderGame();');
+    assert.strictEqual(toggles.white,true);
+    h.run('client.game.status="BLACK_WON"; client.game.result={winner:"BLACK",reason:"TIMEOUT"}; renderGame();');
+    assert.strictEqual(toggles.white,false);
+    assert.doesNotMatch(h.nodes.get('whiteRole').textContent,/当前回合/);
+});
+
+// Final-review I3: a finished identity game must not block starting a new one.
+const identitySession=id=>({gameId:id,token:'x'.repeat(43),side:'WHITE',playerName:'Alice',bearer:true});
+const createEvent=()=>({preventDefault(){},currentTarget:{elements:{whitePlayer:{value:'Alice'},timeControl:{value:'5+3'}}}});
+test('after leaving a finished game, creating a new game is not blocked',async()=>{
+    const h=harness();
+    h.ctx.savedSession=identitySession(A);h.ctx.savedGame=game(A);h.ctx.savedGame.status='BLACK_WON';
+    h.run('client.identity={playerId:"p1",nickname:"Alice",clientToken:"x".repeat(43)}; client.session=savedSession; client.active=true; client.game=savedGame; saveSession();');
+    h.run('leaveGame()');
+    assert.strictEqual(h.storage.has('morris-live-session-v1'),false,'the finished game is released');
+    assert.strictEqual(h.nodes.get('recoveryCard').hidden,true);
+    const requests=[];
+    h.ctx.fetch=async(p,r)=>{requests.push({p,r});return {ok:true,status:201,text:async()=>JSON.stringify({game:game(B),roomCode:'123456'})};};
+    h.ctx.event=createEvent();
+    await h.run('createGame(event)');
+    const creates=requests.filter(x=>x.r.method==='POST');
+    assert.strictEqual(creates.length,1);assert.strictEqual(creates[0].p,'/api/v1/games');
+    assert.strictEqual(h.run('client.session.gameId'),B);
+});
+
+test('a saved identity game with nothing in flight is replaced by a new game instead of blocking',async()=>{
+    const h=harness();h.save({session:identitySession(A)});
+    h.run('client.identity={playerId:"p1",nickname:"Alice",clientToken:"x".repeat(43)};');
+    h.ctx.fetch=async()=>({ok:true,status:201,text:async()=>JSON.stringify({game:game(B),roomCode:'123456'})});
+    h.ctx.event=createEvent();
+    await h.run('createGame(event)');
+    assert.strictEqual(JSON.parse(h.storage.get('morris-live-session-v1')).session.gameId,B);
+});
+
+test('a pending unconfirmed action still blocks starting a new game, even after leaving a finished game',async()=>{
+    for (const leaveFirst of [false,true]) {
+        const h=harness();
+        h.ctx.savedSession=identitySession(A);h.ctx.savedGame=game(A);h.ctx.savedGame.status='BLACK_WON';
+        h.run('client.identity={playerId:"p1",nickname:"Alice",clientToken:"x".repeat(43)}; client.session=savedSession; client.active=true; client.game=savedGame; client.pendingAction={gameId:savedSession.gameId,key:"k",body:{}}; saveSession();');
+        if (leaveFirst) h.run('leaveGame()');
+        assert.ok(JSON.parse(h.storage.get('morris-live-session-v1')).pendingAction,'the unconfirmed action is kept');
+        let requests=0;h.ctx.fetch=async()=>{requests++;return response(game(B));};
+        h.ctx.event=createEvent();
+        await h.run('createGame(event)');
+        assert.strictEqual(requests,0);
+        assert.match(h.nodes.get('toast').textContent,/未确认/);
+    }
+});
+
+test('a legacy anonymous saved seat still blocks starting a new game',async()=>{
+    const h=harness();h.save({session:session(A)});
+    let requests=0;h.ctx.fetch=async()=>{requests++;return response(game(B));};
+    h.ctx.event=createEvent();
+    await h.run('createGame(event)');
+    assert.strictEqual(requests,0);
 });

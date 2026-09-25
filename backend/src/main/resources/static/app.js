@@ -17,6 +17,9 @@ const COORDINATES = {
 };
 
 const STORAGE_KEY = "morris-live-session-v1";
+// Every status in which the game can no longer change (no moves, no draw offers). Rematch is the
+// only action a finished game still accepts.
+const TERMINAL_STATUSES = new Set(["WHITE_WON", "BLACK_WON", "DRAWN", "ABORTED", "CANCELLED"]);
 const IDENTITY_STORAGE_KEY = "morris.player.v1";
 const MAX_LOG_ITEMS = 8;
 
@@ -223,9 +226,9 @@ async function restoreSession() {
     } catch (error) {
         if (!matches(ctx)) return;
         showSetup();
-        const text = error.code === "GAME_NOT_FOUND" ? "对局不存在，请确认服务连接或明确清除身份。"
-            : error.code === "INVALID_PLAYER_TOKEN" ? "玩家凭证已失效，可明确清除身份后重新加入。"
-            : "暂时无法恢复，身份已保留，请点击恢复重试。";
+        const text = error.code === "GAME_NOT_FOUND" ? "对局不存在，请确认服务连接或清除本标签页保存的对局。"
+            : error.code === "INVALID_PLAYER_TOKEN" ? "玩家凭证已失效，可清除本标签页保存的对局后重新加入。"
+            : "暂时无法恢复，保存的对局已保留，请点击恢复重试。";
         showToast(text);
     } finally { if (matches(ctx)) entryBusy(false); }
 }
@@ -233,8 +236,13 @@ async function restoreSession() {
 function mayStartEntry() {
     if (client.entryBusy) return false;
     const saved = loadSaved();
-    if (saved.session || saved.pendingJoin) {
-        showToast("本标签页已有身份，请先恢复；需要更换对局时，请明确清除保存的身份。");
+    // A saved identity (Bearer) game with nothing in flight can simply be replaced: that game is
+    // always recoverable later through 我的对局 / the player identity. What must never be dropped
+    // silently is an unconfirmed action or join, or a legacy anonymous seat credential (the only
+    // copy of that seat's proof).
+    const replaceable = Boolean(saved.session?.bearer) && !saved.pendingAction && !saved.pendingJoin;
+    if ((saved.session || saved.pendingJoin) && !replaceable) {
+        showToast("本标签页有未完成的对局或未确认的请求，请先恢复；需要更换对局时，请清除本标签页保存的对局。");
         return false;
     }
     client.epoch++;
@@ -319,7 +327,9 @@ async function resumeJoin() {
 
 function clearSession() {
     if (client.entryBusy) return;
-    if (!window.confirm("永久清除本标签页的玩家凭证和未确认请求？之后无法仅凭姓名恢复身份。")) return;
+    // Clears only this tab's saved game (and any unconfirmed request). The persistent player
+    // identity in localStorage - and with it 我的对局 - is untouched.
+    if (!window.confirm("清除本标签页保存的对局和未确认的请求？玩家身份和“我的对局”不受影响；匿名加入的对局清除后无法再恢复。")) return;
     leaveGame();
     sessionStorage.removeItem(STORAGE_KEY);
     client.session = null;
@@ -328,7 +338,7 @@ function clearSession() {
     client.roomCode = null;
     showSetup();
     setConnection("offline", "尚未进入对局");
-    showToast("保存的身份已明确清除");
+    showToast("本标签页保存的对局已清除");
 }
 
 function enterGame(game, message) {
@@ -357,6 +367,10 @@ function showSetup() {
 }
 
 function leaveGame() {
+    // A finished game has nothing left to recover, so leaving it releases this tab's saved session
+    // and lets the next create/join proceed. An unconfirmed action is still kept (and still blocks)
+    // until it is retried or explicitly cleared.
+    const releaseSaved = TERMINAL_STATUSES.has(client.game?.status) && !client.pendingAction && !client.pendingJoin;
     client.epoch++;
     client.active = false;
     client.retryBusy = false;
@@ -369,8 +383,13 @@ function leaveGame() {
     client.presence = null;
     renderPresence();
     history.replaceState({}, "", window.location.pathname);
+    if (releaseSaved) {
+        try { sessionStorage.removeItem(STORAGE_KEY); } catch { /* storage unavailable: nothing saved */ }
+        client.session = null;
+        client.roomCode = null;
+    }
     showSetup();
-    setConnection("offline", "身份已保存，可恢复对局");
+    setConnection("offline", releaseSaved ? "尚未进入对局" : "身份已保存，可恢复对局");
 }
 
 async function refreshGame(reason = "状态刷新") {
@@ -397,7 +416,9 @@ async function handlePositionClick(position) {
         showToast("等待黑方加入后才能开始落子");
         return;
     }
-    if (client.game.state.winner) return;
+    // Only an IN_PROGRESS game is playable. state.winner alone is not enough: a TIMEOUT, RESIGN,
+    // agreed-draw or ABORTED game has no engine winner but is just as finished.
+    if (client.game.status !== "IN_PROGRESS") return;
     if (client.game.state.currentPlayer !== client.session.side) {
         showToast("现在是对方回合；对方操作后棋盘会自动更新");
         return;
@@ -495,6 +516,15 @@ function applyGame(game, source) {
         client.selectedSource = null;
     } else if (previousVersion == null) client.lastChanged = [];
     client.game = game;
+    // For an identity session, the authoritative side is whichever seat carries our playerId.
+    // This also repairs a session saved with the wrong side (e.g. by the old nickname match).
+    if (client.session.bearer) {
+        const side = mySide(game);
+        if (side && side !== client.session.side) {
+            client.session = { ...client.session, side };
+            try { saveSession(); } catch { /* keep the corrected side in memory */ }
+        }
+    }
     if (game.clock && game.clock.serverNow) {
         client.clockSkewMs = Date.now() - Date.parse(game.clock.serverNow);
     }
@@ -519,7 +549,9 @@ function renderGame() {
     elements.playerSide.textContent = `${sideLabel(client.session.side)} · ${client.session.playerName}`;
     elements.gameVersion.textContent = String(game.version);
     elements.gamePhase.textContent = phaseLabel(game.phase);
-    elements.currentPlayer.textContent = state.winner ? `${sideLabel(state.winner)} 获胜` : sideLabel(state.currentPlayer);
+    const live = game.status === "IN_PROGRESS";
+    elements.currentPlayer.textContent = live ? sideLabel(state.currentPlayer)
+        : TERMINAL_STATUSES.has(game.status) ? resultText(game) : "—";
     elements.gameIdText.textContent = game.id;
     elements.whitePlayerName.textContent = game.whitePlayer;
     elements.blackPlayerName.textContent = game.blackPlayer || "等待加入";
@@ -528,7 +560,7 @@ function renderGame() {
     for (const side of ["WHITE", "BLACK"]) {
         const prefix = side.toLowerCase();
         document.getElementById(prefix + "OnBoard").textContent = String(Object.values(state.board).filter(piece => piece === side).length);
-        const isTurn = !state.winner && game.status !== "WAITING_FOR_PLAYER" && state.currentPlayer === side;
+        const isTurn = live && state.currentPlayer === side;
         document.getElementById(prefix + "Card").classList.toggle("is-turn", isTurn);
         document.getElementById(prefix + "Role").textContent = sideLabel(side) + (client.session.side === side ? " · 你" : "") + (isTurn ? " · 当前回合" : "");
     }
@@ -547,8 +579,8 @@ function renderGame() {
 function renderBoard() {
     const game = client.game;
     const canAct = Boolean(
-        game && client.session && !client.pendingAction && !game.state.winner &&
-        game.status !== "WAITING_FOR_PLAYER" && game.state.currentPlayer === client.session.side
+        game && client.session && !client.pendingAction &&
+        game.status === "IN_PROGRESS" && game.state.currentPlayer === client.session.side
     );
     const legal = new Set();
     if (canAct) {
@@ -579,7 +611,7 @@ function actionPrompt() {
     if (!game) return "创建或加入对局后即可操作";
     if (client.pendingAction) return client.retryBusy ? "正在确认你的操作…" : "操作结果未确认，请点击重试";
     if (game.status === "WAITING_FOR_PLAYER") return "等待黑方加入，复制邀请链接发给朋友";
-    if (game.state.winner) return `${sideLabel(game.state.winner)}获胜，对局结束`;
+    if (game.status !== "IN_PROGRESS") return `${resultText(game)}，对局结束`;
     if (game.state.currentPlayer !== client.session.side) return `等待${sideLabel(game.state.currentPlayer)}操作，棋盘会自动同步`;
     if (client.pendingAction) return "有未确认操作，请等待或点击重试";
     if (game.phase === "PLACING") return "轮到你了：选择一个高亮棋位放置棋子";
@@ -664,10 +696,10 @@ function renderClock() {
 function renderResult() {
     const box = elements.resultReason;
     if (!box) return;
-    const result = client.game?.result;
-    if (result && result.reason) {
+    const game = client.game;
+    if (game && TERMINAL_STATUSES.has(game.status)) {
         box.hidden = false;
-        box.textContent = resultReasonLabel(result.reason);
+        box.textContent = resultText(game);
     } else {
         box.hidden = true;
     }
@@ -732,6 +764,22 @@ function renderPresence() {
     const state = client.presence[opponentSide];
     elements.opponentPresence.textContent = state === "OFFLINE" ? "对手已离线，棋钟仍在计时"
         : state === "ONLINE" ? "对手在线" : "—";
+}
+
+// The outcome of a finished game in one line: who won (or draw/aborted/cancelled) plus why, e.g.
+// "黑方胜 · 超时", "白方胜 · 认输", "和棋 · 三次重复", "已放弃 · 首步超时". Reads status (and
+// result.winner), never state.winner, which is null for clock/resign/agreed-draw endings.
+function resultText(game) {
+    const status = game?.status;
+    const winner = game?.result?.winner;
+    const outcome = status === "WHITE_WON" || winner === "WHITE" ? "白方胜"
+        : status === "BLACK_WON" || winner === "BLACK" ? "黑方胜"
+        : status === "DRAWN" ? "和棋"
+        : status === "ABORTED" ? "已放弃"
+        : status === "CANCELLED" ? "已取消"
+        : gameStatusLabel(status);
+    const reason = game?.result?.reason;
+    return reason ? `${outcome} · ${resultReasonLabel(reason)}` : outcome;
 }
 
 async function resign() {
@@ -1072,8 +1120,13 @@ async function enterMyGame(gameId) {
     try {
         const game = await api(`/api/v1/games/${gameId}/session`, { headers: authHeader(client.identity.clientToken) });
         if (!matches(ctx)) return;
+        const side = mySide(game);
+        if (!side) {
+            showToast("无法确认你在该对局中的席位，请刷新后重试");
+            return;
+        }
         client.session = { gameId: game.id, token: client.identity.clientToken,
-            side: mySide(game), playerName: client.identity.nickname, bearer: true };
+            side, playerName: client.identity.nickname, bearer: true };
         client.roomCode = null;
         saveSession();
         enterGame(game, "已通过身份打开对局");
@@ -1084,8 +1137,17 @@ async function enterMyGame(gameId) {
     }
 }
 
+// Which seat this browser's player holds in `game`. Decided by player id, never by nickname: two
+// identities may share a nickname (final-review C1). Falls back to the stored session side for a
+// legacy anonymous session, whose game carries no player ids. Returns null when neither applies.
 function mySide(game) {
-    return game.whitePlayer === client.identity.nickname ? "WHITE" : "BLACK";
+    const playerId = client.identity?.playerId;
+    if (playerId && game) {
+        if (game.whitePlayerId === playerId) return "WHITE";
+        if (game.blackPlayerId === playerId) return "BLACK";
+    }
+    if (client.session?.side && game && client.session.gameId === game.id) return client.session.side;
+    return null;
 }
 
 async function lookupRoomCode() {
