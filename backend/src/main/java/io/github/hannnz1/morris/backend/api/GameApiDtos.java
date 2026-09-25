@@ -86,7 +86,7 @@ public final class GameApiDtos {
     ) {
     }
 
-    public record ClockView(long whiteMs, long blackMs, boolean running, Instant serverNow) {
+    public record ClockView(long whiteMs, long blackMs, boolean running, Instant serverNow, Instant turnDeadlineAt) {
     }
 
     public record ResultView(String winner, String reason) {

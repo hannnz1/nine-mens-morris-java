@@ -66,11 +66,13 @@ class ChessClockTest extends PostgresIntegrationTest {
         var created = gameSessions.createForPlayer(white, "k1", "5+3");
         assertThat(created.game().clock().running()).isFalse();
 
+        Instant joinInstant = clock.instant();
         PlayerEntity black = createPlayer("Zhu");
         var joined = gameSessions.joinByBearer(created.game().id(), black, "k2");
         assertThat(joined.game().clock().running()).isTrue();
         assertThat(joined.game().clock().whiteMs()).isEqualTo(5 * 60_000L);
         assertThat(joined.game().clock().blackMs()).isEqualTo(5 * 60_000L);
+        assertThat(joined.game().clock().turnDeadlineAt()).isEqualTo(joinInstant.plusSeconds(30));
     }
 
     // Spec M2.3's first-move grace: "双方各自的第一步只有 30 秒（不消耗主时间）" - a side's own first

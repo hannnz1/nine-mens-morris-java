@@ -88,11 +88,12 @@ public class GameFinisher {
 
     private ClockView clockView(GameSessionEntity entity) {
         if (entity.getTurnDeadlineAt() == null) {
-            return new ClockView(0, 0, false, clock.instant());
+            return new ClockView(0, 0, false, clock.instant(), null);
         }
         // A game that finish() just closed out is never still "running" - status is already the
         // terminal value by the time toResponse reads it here.
-        return new ClockView(entity.getWhiteRemainingMs(), entity.getBlackRemainingMs(), false, clock.instant());
+        return new ClockView(entity.getWhiteRemainingMs(), entity.getBlackRemainingMs(), false, clock.instant(),
+                entity.getTurnDeadlineAt());
     }
 
     private void publishAfterCommit(java.util.UUID gameId, GameResponse response) {

@@ -87,7 +87,23 @@ const elements = {
     copyRoomCode: document.getElementById("copyRoomCode"),
     myGamesList: document.getElementById("my-games-list"),
     roomCodeInput: document.getElementById("roomCodeInput"),
-    roomCodeJoinButton: document.getElementById("roomCodeJoinButton")
+    roomCodeJoinButton: document.getElementById("roomCodeJoinButton"),
+    whiteClock: document.getElementById("whiteClock"),
+    blackClock: document.getElementById("blackClock"),
+    clockGrace: document.getElementById("clockGrace"),
+    opponentPresence: document.getElementById("opponentPresence"),
+    resultReason: document.getElementById("resultReason"),
+    gameActions: document.getElementById("gameActions"),
+    cancelButton: document.getElementById("cancelButton"),
+    resignButton: document.getElementById("resignButton"),
+    drawOfferButton: document.getElementById("drawOfferButton"),
+    drawAcceptButton: document.getElementById("drawAcceptButton"),
+    drawDeclineButton: document.getElementById("drawDeclineButton"),
+    drawStatusText: document.getElementById("drawStatusText"),
+    rematchButton: document.getElementById("rematchButton"),
+    rematchAcceptButton: document.getElementById("rematchAcceptButton"),
+    rematchDeclineButton: document.getElementById("rematchDeclineButton"),
+    rematchStatusText: document.getElementById("rematchStatusText")
 };
 
 const client = {
@@ -109,7 +125,10 @@ const client = {
     lastChanged: [],
     logs: [],
     identity: null,
-    roomCode: null
+    roomCode: null,
+    clockTimer: null,
+    clockSkewMs: 0,
+    presence: null
 };
 
 initializeBoard();
@@ -146,6 +165,14 @@ function bindEvents() {
     elements.refreshGame.addEventListener("click", () => refreshGame("手动刷新"));
     elements.copyRoomCode.addEventListener("click", copyRoomCode);
     elements.roomCodeJoinButton.addEventListener("click", lookupRoomCode);
+    elements.cancelButton.addEventListener("click", () => void cancelGame());
+    elements.resignButton.addEventListener("click", () => { if (window.confirm("确定要认输吗？")) void resign(); });
+    elements.drawOfferButton.addEventListener("click", () => void offerDraw("OFFER"));
+    elements.drawAcceptButton.addEventListener("click", () => void offerDraw("ACCEPT"));
+    elements.drawDeclineButton.addEventListener("click", () => void offerDraw("DECLINE"));
+    elements.rematchButton.addEventListener("click", () => void offerRematch("OFFER"));
+    elements.rematchAcceptButton.addEventListener("click", () => void offerRematch("ACCEPT"));
+    elements.rematchDeclineButton.addEventListener("click", () => void offerRematch("DECLINE"));
 }
 
 function prefillSharedGame() {
@@ -220,11 +247,12 @@ async function createGame(event) {
     if (!mayStartEntry()) return;
     const playerName = event.currentTarget.elements.whitePlayer.value.trim();
     if (!playerName) return;
+    const timeControl = event.currentTarget.elements.timeControl?.value || "5+3";
     const ctx = context();
     entryBusy(true);
     try {
         const options = client.identity
-            ? { method: "POST", headers: { ...authHeader(client.identity.clientToken), "Idempotency-Key": randomToken() } }
+            ? { method: "POST", headers: { ...authHeader(client.identity.clientToken), "Idempotency-Key": randomToken() }, body: { timeControl } }
             : { method: "POST", body: { whitePlayer: playerName } };
         const response = await api("/api/v1/games", options);
         if (!matches(ctx)) return;
@@ -333,10 +361,13 @@ function leaveGame() {
     client.active = false;
     client.retryBusy = false;
     disconnectRealtime();
+    stopClockLoop();
     client.game = null;
     client.selectedSource = null;
     client.logs = [];
     client.lastChanged = [];
+    client.presence = null;
+    renderPresence();
     history.replaceState({}, "", window.location.pathname);
     showSetup();
     setConnection("offline", "身份已保存，可恢复对局");
@@ -455,6 +486,7 @@ async function retryAction() {
 function applyGame(game, source) {
     if (!client.active || game?.id !== client.session?.gameId) return;
     const previousVersion = client.game?.version;
+    const previousRematchGameId = client.game?.rematchGameId;
     if (previousVersion != null && game.version < previousVersion) return;
     if (previousVersion != null && game.version > previousVersion) {
         const changes = POSITIONS.filter(p => (client.game.state.board[p] || "EMPTY") !== (game.state.board[p] || "EMPTY"));
@@ -463,8 +495,17 @@ function applyGame(game, source) {
         client.selectedSource = null;
     } else if (previousVersion == null) client.lastChanged = [];
     client.game = game;
+    if (game.clock && game.clock.serverNow) {
+        client.clockSkewMs = Date.now() - Date.parse(game.clock.serverNow);
+    }
     if (source === "WEBSOCKET" && game.version > (previousVersion ?? -1)) {
         addLog(`收到服务端实时推送 · 版本 ${game.version}`);
+    }
+    // A rematch that just became available (rematchGameId only appears once the new game exists)
+    // takes both windows straight into the new game rather than leaving them on the finished one.
+    if (game.rematchGameId && !previousRematchGameId) {
+        void enterMyGame(game.rematchGameId);
+        return;
     }
     renderGame();
 }
@@ -496,6 +537,11 @@ function renderGame() {
     notice.textContent = client.retryBusy ? "正在确认操作，请稍候…" : "上次操作结果尚未确认。请重试原请求，确认前不能继续落子。";
     elements.actionPrompt.textContent = actionPrompt();
     renderBoard();
+    renderActions();
+    renderResult();
+    renderPresence();
+    ensureClockLoop();
+    renderClock();
 }
 
 function renderBoard() {
@@ -540,6 +586,199 @@ function actionPrompt() {
     if (game.phase === "REMOVE") return "已形成磨：选择一个高亮的对方棋子移除";
     if (client.selectedSource) return `已选择 ${client.selectedSource}：请选择高亮目标位置`;
     return game.phase === "FLYING" ? "飞行阶段：选择棋子后可移动到任意空位" : "选择一个高亮棋子进行移动";
+}
+
+// Pure, testable clock math (spec M2.3). formatClock never renders a negative duration.
+function formatClock(ms) {
+    const clamped = Math.max(0, ms);
+    const totalSeconds = Math.floor(clamped / 1000);
+    const minutes = String(Math.floor(totalSeconds / 60)).padStart(2, "0");
+    const seconds = String(totalSeconds % 60).padStart(2, "0");
+    return `${minutes}:${seconds}`;
+}
+
+// Given a ClockView snapshot/push, the game state (for the piecesToPlace first-move check) and
+// which side is to move, returns what each side's clock (and, for a first move, its separate
+// grace countdown) should show right now. skewMs must be (localNowMs - Date.parse(serverNow))
+// captured at the moment the snapshot/push that produced `clock` arrived - the caller corrects
+// for it here as correctedNow = localNowMs - skewMs, per spec M2.3.
+function computeClockDisplay(clock, gameState, sideToMove, localNowMs, skewMs) {
+    const white = { ms: clock?.whiteMs ?? 0, graceMs: null };
+    const black = { ms: clock?.blackMs ?? 0, graceMs: null };
+    if (!clock || !clock.running || !clock.turnDeadlineAt) {
+        return { white, black };
+    }
+    const correctedNow = localNowMs - (skewMs || 0);
+    const deadlineMs = Date.parse(clock.turnDeadlineAt);
+    const remaining = Math.max(0, deadlineMs - correctedNow);
+    const target = sideToMove === "WHITE" ? white : black;
+    const firstMove = sideToMove === "WHITE"
+        ? gameState?.whitePiecesToPlace === 9
+        : gameState?.blackPiecesToPlace === 9;
+    if (firstMove) target.graceMs = remaining;
+    else target.ms = remaining;
+    return { white, black };
+}
+
+function ensureClockLoop() {
+    const shouldRun = client.active && client.game && client.game.status === "IN_PROGRESS";
+    if (shouldRun && !client.clockTimer) {
+        client.clockTimer = setInterval(renderClock, 100); // spec M2.3: refresh every 100ms
+    } else if (!shouldRun && client.clockTimer) {
+        stopClockLoop();
+    }
+}
+
+function stopClockLoop() {
+    if (client.clockTimer) {
+        clearInterval(client.clockTimer);
+        client.clockTimer = null;
+    }
+}
+
+function renderClock() {
+    const game = client.game;
+    if (!game || !elements.whiteClock || !elements.blackClock) return;
+    const clock = game.clock;
+    const hasClock = Boolean(clock && (clock.running || clock.turnDeadlineAt || clock.whiteMs || clock.blackMs));
+    if (!hasClock) {
+        elements.whiteClock.textContent = "--:--";
+        elements.blackClock.textContent = "--:--";
+        if (elements.clockGrace) elements.clockGrace.hidden = true;
+        return;
+    }
+    const display = computeClockDisplay(clock, game.state, game.state.currentPlayer, Date.now(), client.clockSkewMs);
+    elements.whiteClock.textContent = formatClock(display.white.ms);
+    elements.blackClock.textContent = formatClock(display.black.ms);
+    if (elements.clockGrace) {
+        const graceMs = display.white.graceMs ?? display.black.graceMs;
+        if (graceMs != null) {
+            elements.clockGrace.hidden = false;
+            elements.clockGrace.textContent = `首步 ${Math.ceil(graceMs / 1000)}s`;
+        } else {
+            elements.clockGrace.hidden = true;
+        }
+    }
+}
+
+function renderResult() {
+    const box = elements.resultReason;
+    if (!box) return;
+    const result = client.game?.result;
+    if (result && result.reason) {
+        box.hidden = false;
+        box.textContent = resultReasonLabel(result.reason);
+    } else {
+        box.hidden = true;
+    }
+}
+
+function renderActions() {
+    const box = elements.gameActions;
+    if (!box) return;
+    const toggles = [elements.cancelButton, elements.resignButton, elements.drawOfferButton,
+        elements.drawAcceptButton, elements.drawDeclineButton, elements.drawStatusText,
+        elements.rematchButton, elements.rematchAcceptButton, elements.rematchDeclineButton, elements.rematchStatusText];
+    for (const el of toggles) if (el) el.hidden = true;
+    const game = client.game;
+    const session = client.session;
+    // Resign/cancel/draw/rematch are identity-only; legacy anonymous sessions never carry a bearer.
+    const isIdentity = Boolean(session?.bearer);
+    if (!isIdentity || !game) {
+        box.hidden = true;
+        return;
+    }
+    box.hidden = false;
+    const mySideVal = session.side;
+    if (game.status === "WAITING_FOR_PLAYER") {
+        if (mySideVal === "WHITE" && elements.cancelButton) elements.cancelButton.hidden = false;
+        else box.hidden = true;
+    } else if (game.status === "IN_PROGRESS") {
+        if (elements.resignButton) elements.resignButton.hidden = false;
+        if (game.drawOfferedBy && game.drawOfferedBy !== mySideVal) {
+            if (elements.drawAcceptButton) elements.drawAcceptButton.hidden = false;
+            if (elements.drawDeclineButton) elements.drawDeclineButton.hidden = false;
+        } else if (game.drawOfferedBy === mySideVal) {
+            if (elements.drawStatusText) elements.drawStatusText.hidden = false;
+        } else if (elements.drawOfferButton) {
+            elements.drawOfferButton.hidden = false;
+        }
+    } else if (game.status === "WHITE_WON" || game.status === "BLACK_WON" || game.status === "DRAWN") {
+        if (game.rematchOfferedBy && game.rematchOfferedBy !== mySideVal) {
+            if (elements.rematchAcceptButton) elements.rematchAcceptButton.hidden = false;
+            if (elements.rematchDeclineButton) elements.rematchDeclineButton.hidden = false;
+        } else if (game.rematchOfferedBy === mySideVal) {
+            if (elements.rematchStatusText) elements.rematchStatusText.hidden = false;
+        } else if (elements.rematchButton) {
+            elements.rematchButton.hidden = false;
+        }
+    } else {
+        box.hidden = true;
+    }
+}
+
+function updatePresence(white, black) {
+    client.presence = { WHITE: white, BLACK: black };
+    renderPresence();
+}
+
+function renderPresence() {
+    if (!elements.opponentPresence) return;
+    if (!client.session || !client.presence) {
+        elements.opponentPresence.textContent = "—";
+        return;
+    }
+    const opponentSide = client.session.side === "WHITE" ? "BLACK" : "WHITE";
+    const state = client.presence[opponentSide];
+    elements.opponentPresence.textContent = state === "OFFLINE" ? "对手已离线，棋钟仍在计时"
+        : state === "ONLINE" ? "对手在线" : "—";
+}
+
+async function resign() {
+    await runGameAction(() => api(`/api/v1/games/${client.game.id}/resign`, {
+        method: "POST",
+        headers: { ...credentialHeaders(), "Idempotency-Key": randomToken() }
+    }));
+}
+
+async function cancelGame() {
+    await runGameAction(() => api(`/api/v1/games/${client.game.id}/cancel`, {
+        method: "POST",
+        headers: { ...credentialHeaders(), "Idempotency-Key": randomToken() }
+    }));
+}
+
+async function offerDraw(action) {
+    await runGameAction(() => api(`/api/v1/games/${client.game.id}/draw`, {
+        method: "POST",
+        headers: { ...credentialHeaders(), "Idempotency-Key": randomToken() },
+        body: { action }
+    }));
+}
+
+async function offerRematch(action) {
+    await runGameAction(() => api(`/api/v1/games/${client.game.id}/rematch`, {
+        method: "POST",
+        headers: { ...credentialHeaders(), "Idempotency-Key": randomToken() },
+        body: { action }
+    }));
+}
+
+// Shared wrapper for resign/cancel/draw/rematch: applies the returned GameResponse like any other
+// REST response, and per the M2 controller ruling, a 409 (the game already ended, e.g. the mover's
+// clock ran out first) means the local copy is stale, so it refreshes instead of just toasting.
+async function runGameAction(request) {
+    if (!client.session || !client.game || client.pendingAction) return;
+    const ctx = context();
+    try {
+        const game = await request();
+        if (!matches(ctx)) return;
+        applyGame(game, "REST");
+    } catch (error) {
+        if (!matches(ctx)) return;
+        showToast(readableError(error));
+        if (error.status === 409) await refreshGame("操作被拒绝，已同步最新状态");
+    }
 }
 
 function sideLabel(side) { return side === "WHITE" ? "白方" : "黑方"; }
@@ -597,6 +836,10 @@ function connectRealtime() {
                 if (message.game?.id === ctx.gameId && Number.isSafeInteger(message.game.version)) {
                     applyGame(message.game, "WEBSOCKET");
                 }
+            } else if (message?.type === "PRESENCE") {
+                // Deliberately NOT gated on client.subscribed: the server may send the initial
+                // presence snapshot before the SUBSCRIBED ack for this same connection.
+                updatePresence(message.white, message.black);
             } else if (message?.type === "ERROR") {
                 rejectionCode = message.code;
                 retryAllowed = message.code === "INTERNAL_ERROR" || message.code === "AUTH_TIMEOUT";
@@ -795,7 +1038,28 @@ async function renderMyGames() {
 }
 
 function gameStatusLabel(status) {
-    return ({ WAITING_FOR_PLAYER: "等待对手", IN_PROGRESS: "进行中" })[status] || status;
+    return ({
+        WAITING_FOR_PLAYER: "等待对手",
+        IN_PROGRESS: "进行中",
+        WHITE_WON: "白方胜",
+        BLACK_WON: "黑方胜",
+        DRAWN: "和棋",
+        ABORTED: "已放弃（首步超时）",
+        CANCELLED: "已取消"
+    })[status] || status;
+}
+
+function resultReasonLabel(reason) {
+    return ({
+        NO_PIECES: "棋子不足",
+        NO_MOVES: "无子可走",
+        TIMEOUT: "超时",
+        RESIGN: "认输",
+        DRAW_REPETITION: "三次重复",
+        DRAW_NO_CAPTURE: "50步无吃子",
+        DRAW_AGREED: "协议和棋",
+        ABORTED: "首步超时"
+    })[reason] || reason;
 }
 
 async function enterMyGame(gameId) {

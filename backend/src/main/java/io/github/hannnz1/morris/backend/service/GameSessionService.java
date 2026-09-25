@@ -730,10 +730,10 @@ public class GameSessionService {
 
     private ClockView clockView(GameSessionEntity entity) {
         if (entity.getTurnDeadlineAt() == null) {
-            return new ClockView(0, 0, false, clock.instant()); // pre-clock game (WAITING, or pre-M2)
+            return new ClockView(0, 0, false, clock.instant(), null); // pre-clock game (WAITING, or pre-M2)
         }
         return new ClockView(entity.getWhiteRemainingMs(), entity.getBlackRemainingMs(),
-                "IN_PROGRESS".equals(entity.getStatus()), clock.instant());
+                "IN_PROGRESS".equals(entity.getStatus()), clock.instant(), entity.getTurnDeadlineAt());
     }
 
     private GameState readState(GameSessionEntity entity) {

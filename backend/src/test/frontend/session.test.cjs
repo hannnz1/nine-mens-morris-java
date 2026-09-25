@@ -27,7 +27,9 @@ function harness() {
         localStorage:{getItem:k=>identityStore.get(k)||null,setItem:(k,v)=>identityStore.set(k,v),removeItem:k=>identityStore.delete(k)},
         window:{location:{search:'',pathname:'/',protocol:'http:',host:'localhost',href:'http://localhost/'},crypto:webcrypto,confirm:()=>true,addEventListener(){}},
         history:{replaceState(){}},URL,URLSearchParams,Uint8Array,AbortController,btoa,console,WebSocket:FakeSocket,
-        setTimeout:(fn,ms)=>{const id=++timerId;timers.set(id,{fn,ms});return id;},clearTimeout:id=>timers.delete(id),fetch:async()=>response(game())});
+        setTimeout:(fn,ms)=>{const id=++timerId;timers.set(id,{fn,ms});return id;},clearTimeout:id=>timers.delete(id),
+        setInterval:(fn,ms)=>{const id=++timerId;timers.set(id,{fn,ms,interval:true});return id;},clearInterval:id=>timers.delete(id),
+        fetch:async()=>response(game())});
     vm.runInContext(source,ctx);
     const run=code=>vm.runInContext(code,ctx);
     const save=data=>storage.set('morris-live-session-v1',JSON.stringify(data));
@@ -212,4 +214,144 @@ test('loadIdentity returns null and does not throw when localStorage access thro
     const h=harness();
     h.ctx.localStorage={getItem:()=>{throw new Error('SecurityError');}};
     assert.strictEqual(h.run('loadIdentity()'),null);
+});
+
+test('formatClock renders mm:ss and never negative',()=>{
+    const h=harness();
+    assert.strictEqual(h.run('formatClock(65_000)'),'01:05');
+    assert.strictEqual(h.run('formatClock(0)'),'00:00');
+    assert.strictEqual(h.run('formatClock(-500)'),'00:00');
+});
+
+test('computeClockDisplay corrects for client/server clock skew when counting down to turnDeadlineAt',()=>{
+    const h=harness();
+    // Client-local clock runs 2s ahead of the server: skewMs = localNow - serverNow = 2000.
+    // correctedNow = localNow - skewMs must land back on the server's own timeline, so with a
+    // deadline 10s after that corrected instant, ~10s (not ~8s) should remain.
+    h.ctx.clock={whiteMs:60_000,blackMs:60_000,running:true,
+        serverNow:'2026-01-01T00:00:00Z',turnDeadlineAt:'2026-01-01T00:00:10Z'};
+    h.ctx.state={whitePiecesToPlace:5,blackPiecesToPlace:5};
+    const localNowMs=Date.parse('2026-01-01T00:00:02Z');
+    const skewMs=2000;
+    const display=h.run(`computeClockDisplay(clock, state, "WHITE", ${localNowMs}, ${skewMs})`);
+    assert.ok(display.white.ms<=10_000&&display.white.ms>9_000,`expected ~10000ms remaining, got ${display.white.ms}`);
+    assert.strictEqual(display.white.graceMs,null);
+    assert.strictEqual(display.black.ms,60_000);
+});
+
+test('computeClockDisplay keeps a first move\'s stored time static and reports a separate grace countdown',()=>{
+    const h=harness();
+    h.ctx.clock={whiteMs:300_000,blackMs:300_000,running:true,
+        serverNow:'2026-01-01T00:00:00Z',turnDeadlineAt:'2026-01-01T00:00:30Z'};
+    h.ctx.state={whitePiecesToPlace:9,blackPiecesToPlace:9};
+    const localNowMs=Date.parse('2026-01-01T00:00:12Z');
+    const display=h.run(`computeClockDisplay(clock, state, "WHITE", ${localNowMs}, 0)`);
+    assert.strictEqual(display.white.ms,300_000);
+    assert.strictEqual(display.white.graceMs,18_000);
+    assert.strictEqual(display.black.ms,300_000);
+    assert.strictEqual(display.black.graceMs,null);
+});
+
+test('computeClockDisplay counts a non-first move down from turnDeadlineAt and never below zero',()=>{
+    const h=harness();
+    h.ctx.clock={whiteMs:60_000,blackMs:45_000,running:true,
+        serverNow:'2026-01-01T00:00:00Z',turnDeadlineAt:'2026-01-01T00:00:05Z'};
+    h.ctx.state={whitePiecesToPlace:3,blackPiecesToPlace:0};
+    const midMove=h.run(`computeClockDisplay(clock, state, "BLACK", ${Date.parse('2026-01-01T00:00:02Z')}, 0)`);
+    assert.strictEqual(midMove.black.ms,3_000);
+    assert.strictEqual(midMove.black.graceMs,null);
+    assert.strictEqual(midMove.white.ms,60_000);
+    const afterDeadline=h.run(`computeClockDisplay(clock, state, "BLACK", ${Date.parse('2026-01-01T00:00:09Z')}, 0)`);
+    assert.strictEqual(afterDeadline.black.ms,0);
+});
+
+test('computeClockDisplay leaves both sides static when the clock is not running',()=>{
+    const h=harness();
+    h.ctx.clock={whiteMs:12_000,blackMs:34_000,running:false,
+        serverNow:'2026-01-01T00:00:00Z',turnDeadlineAt:null};
+    h.ctx.state={whitePiecesToPlace:0,blackPiecesToPlace:0};
+    const display=h.run('computeClockDisplay(clock, state, "WHITE", Date.now(), 0)');
+    assert.strictEqual(display.white.ms,12_000);
+    assert.strictEqual(display.black.ms,34_000);
+    assert.strictEqual(display.white.graceMs,null);
+    assert.strictEqual(display.black.graceMs,null);
+});
+
+test('gameStatusLabel covers the M2 terminal statuses',()=>{
+    const h=harness();
+    assert.strictEqual(h.run('gameStatusLabel("DRAWN")'),'和棋');
+    assert.strictEqual(h.run('gameStatusLabel("ABORTED")'),'已放弃（首步超时）');
+    assert.strictEqual(h.run('gameStatusLabel("CANCELLED")'),'已取消');
+});
+
+test('resultReasonLabel maps every backend reason to Chinese copy',()=>{
+    const h=harness();
+    assert.strictEqual(h.run('resultReasonLabel("TIMEOUT")'),'超时');
+    assert.strictEqual(h.run('resultReasonLabel("RESIGN")'),'认输');
+    assert.strictEqual(h.run('resultReasonLabel("DRAW_REPETITION")'),'三次重复');
+    assert.strictEqual(h.run('resultReasonLabel("DRAW_NO_CAPTURE")'),'50步无吃子');
+    assert.strictEqual(h.run('resultReasonLabel("DRAW_AGREED")'),'协议和棋');
+    assert.strictEqual(h.run('resultReasonLabel("NO_PIECES")'),'棋子不足');
+    assert.strictEqual(h.run('resultReasonLabel("NO_MOVES")'),'无子可走');
+});
+
+test('opponent presence badge shows the required offline copy and resets when leaving the game',()=>{
+    const h=harness();h.activate();
+    h.run('client.session.side="WHITE"; updatePresence("ONLINE","OFFLINE");');
+    assert.strictEqual(h.nodes.get('opponentPresence').textContent,'对手已离线，棋钟仍在计时');
+    h.run('updatePresence("ONLINE","ONLINE");');
+    assert.strictEqual(h.nodes.get('opponentPresence').textContent,'对手在线');
+    h.run('leaveGame();');
+    assert.strictEqual(h.nodes.get('opponentPresence').textContent,'—');
+});
+
+test('PRESENCE websocket messages update the badge even before SUBSCRIBED arrives',()=>{
+    const h=harness();h.activate();
+    h.run('client.session.side="BLACK"; connectRealtime(); client.socket.emit("open");');
+    h.run('client.socket.emit("message",{data:JSON.stringify({type:"PRESENCE",white:"OFFLINE",black:"ONLINE"})});');
+    assert.strictEqual(h.run('client.subscribed'),false);
+    assert.strictEqual(h.nodes.get('opponentPresence').textContent,'对手已离线，棋钟仍在计时');
+});
+
+test('game actions are hidden for legacy anonymous sessions without a bearer token',()=>{
+    const h=harness();h.activate();
+    h.run('client.session.bearer=false; renderGame();');
+    assert.strictEqual(h.nodes.get('gameActions').hidden,true);
+});
+
+test('WAITING_FOR_PLAYER shows only Cancel for the creating (white) identity session',()=>{
+    const h=harness();h.activate();
+    h.run('client.session.bearer=true; client.session.side="WHITE"; client.game.status="WAITING_FOR_PLAYER"; renderGame();');
+    assert.strictEqual(h.nodes.get('cancelButton').hidden,false);
+    assert.strictEqual(h.nodes.get('resignButton').hidden,true);
+});
+
+test('IN_PROGRESS shows accept/decline when the opponent offered a draw, and the waiting text when I did',()=>{
+    const h=harness();h.activate();
+    h.run('client.session.bearer=true; client.session.side="WHITE"; client.game.status="IN_PROGRESS"; client.game.drawOfferedBy="BLACK"; renderGame();');
+    assert.strictEqual(h.nodes.get('drawAcceptButton').hidden,false);
+    assert.strictEqual(h.nodes.get('drawDeclineButton').hidden,false);
+    assert.strictEqual(h.nodes.get('drawOfferButton').hidden,true);
+    h.run('client.game.drawOfferedBy="WHITE"; renderGame();');
+    assert.strictEqual(h.nodes.get('drawStatusText').hidden,false);
+    assert.strictEqual(h.nodes.get('drawAcceptButton').hidden,true);
+});
+
+test('a finished game offers rematch, and shows accept/decline once the opponent proposed one',()=>{
+    const h=harness();h.activate();
+    h.run('client.session.bearer=true; client.session.side="WHITE"; client.game.status="WHITE_WON"; renderGame();');
+    assert.strictEqual(h.nodes.get('rematchButton').hidden,false);
+    h.run('client.game.rematchOfferedBy="BLACK"; renderGame();');
+    assert.strictEqual(h.nodes.get('rematchAcceptButton').hidden,false);
+    assert.strictEqual(h.nodes.get('rematchButton').hidden,true);
+});
+
+test('a rematchGameId appearing on the current game navigates into the new game',async()=>{
+    const h=harness();h.activate();
+    h.run('client.identity={playerId:"p1",nickname:"Alice",clientToken:"x".repeat(43)}; client.session.bearer=true;');
+    h.ctx.fetch=async()=>response(game('cccccccc-cccc-cccc-cccc-cccccccccccc'));
+    h.ctx.next=game(A,2);h.ctx.next.rematchGameId='cccccccc-cccc-cccc-cccc-cccccccccccc';
+    h.run('applyGame(next,"REST")');
+    await new Promise(setImmediate);await new Promise(setImmediate);await new Promise(setImmediate);
+    assert.strictEqual(h.run('client.session.gameId'),'cccccccc-cccc-cccc-cccc-cccccccccccc');
 });
