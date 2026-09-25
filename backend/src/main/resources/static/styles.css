@@ -28,7 +28,7 @@ body {
     overflow-x: hidden;
 }
 
-button, input { font: inherit; }
+button, input, select { font: inherit; }
 button { color: inherit; }
 
 .page-glow {
@@ -99,13 +99,15 @@ button { color: inherit; }
 .entry-card-primary .entry-number { color: rgba(255,255,255,.055); }
 label { display: grid; gap: 8px; font-size: 11px; color: var(--muted); }
 .entry-card-primary label { color: rgba(255,255,255,.56); }
-input { width: 100%; height: 47px; padding: 0 13px; border: 1px solid var(--line); border-radius: 0; background: rgba(255,255,255,.6); color: var(--ink); outline: none; transition: border-color .18s, box-shadow .18s; }
-.entry-card-primary input { background: rgba(255,255,255,.08); border-color: rgba(255,255,255,.18); color: white; }
-input:focus { border-color: var(--green-bright); box-shadow: 0 0 0 3px rgba(84,193,154,.13); }
+input, select { width: 100%; height: 47px; padding: 0 13px; border: 1px solid var(--line); border-radius: 0; background: rgba(255,255,255,.6); color: var(--ink); outline: none; transition: border-color .18s, box-shadow .18s; }
+.entry-card-primary input, .entry-card-primary select { background: rgba(255,255,255,.08); border-color: rgba(255,255,255,.18); color: white; }
+/* The open dropdown list is drawn by the OS; keep its options readable (dark text on light). */
+.entry-card-primary select option { background: #fff; color: var(--ink); }
+input:focus, select:focus { border-color: var(--green-bright); box-shadow: 0 0 0 3px rgba(84,193,154,.13); }
 
 .button { min-height: 48px; padding: 0 17px; border: 1px solid transparent; display: flex; align-items: center; justify-content: space-between; gap: 20px; cursor: pointer; transition: transform .18s, background .18s, opacity .18s; }
 .button:hover { transform: translateY(-2px); }
-.button:disabled, input:disabled { opacity: .58; cursor: wait; }
+.button:disabled, input:disabled, select:disabled { opacity: .58; cursor: wait; }
 .button-dark { margin-top: auto; background: var(--green-bright); color: #10231d; font-weight: 750; }
 .button-outline { margin-top: auto; background: transparent; border-color: var(--ink); }
 .button-quiet { background: transparent; border-color: var(--line); justify-content: center; }
@@ -122,6 +124,9 @@ input:focus { border-color: var(--green-bright); box-shadow: 0 0 0 3px rgba(84,1
 .match-meta div { display: flex; justify-content: space-between; gap: 18px; padding: 14px 0; border-bottom: 1px solid var(--line); }
 .match-meta dt { color: var(--muted); font-size: 11px; }
 .match-meta dd { margin: 0; font-size: 12px; font-weight: 750; text-align: right; }
+.game-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 16px; }
+.game-actions .button { min-height: 38px; flex: 1 1 auto; }
+.game-actions .text-button { flex: 1 1 100%; text-align: center; font-size: 12px; color: var(--muted); }
 .game-id-block { margin-top: auto; padding: 16px; background: rgba(35,102,83,.06); border: 1px solid rgba(35,102,83,.13); }
 .game-id-block span { color: var(--muted); font-size: 10px; }
 .game-id-block code { display: block; margin: 8px 0 12px; overflow-wrap: anywhere; font-size: 10px; line-height: 1.55; }
@@ -244,7 +249,7 @@ summary { cursor: pointer; font-weight: 650; }
 .position.is-last-change::after { color: #934220; opacity: 1; font-size: 10px; text-decoration: underline; }
 button:focus-visible, summary:focus-visible, a:focus-visible { outline: 3px solid #a65530; outline-offset: 4px; }
 .text-button { min-height: 36px; text-align: left; }
-input { border-radius: 6px; font-size: 16px; }
+input, select { border-radius: 6px; font-size: 16px; }
 .button { border-radius: 6px; }
 @media (max-width: 760px) {
     .brand strong { font-size: 12px; }

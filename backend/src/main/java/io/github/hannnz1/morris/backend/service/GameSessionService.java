@@ -6,10 +6,12 @@ import io.github.hannnz1.morris.backend.api.ApiException;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.ActionRequest;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.CreateGameRequest;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.CreateGameResponse;
+import io.github.hannnz1.morris.backend.api.GameApiDtos.ClockView;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.GameResponse;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.JoinGameRequest;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.JoinGameResponse;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.PlayerCredential;
+import io.github.hannnz1.morris.backend.api.GameApiDtos.ResultView;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.RoomLookupResponse;
 import io.github.hannnz1.morris.backend.api.PlayerApiDtos.GameListResponse;
 import io.github.hannnz1.morris.backend.api.PlayerApiDtos.GameSummary;
@@ -20,6 +22,7 @@ import io.github.hannnz1.morris.backend.persistence.IdempotencyRecordRepository;
 import io.github.hannnz1.morris.backend.persistence.PlayerEntity;
 import io.github.hannnz1.morris.backend.persistence.PlayerIdempotencyRecordEntity;
 import io.github.hannnz1.morris.backend.persistence.PlayerIdempotencyRecordRepository;
+import io.github.hannnz1.morris.backend.persistence.PlayerRepository;
 import io.github.hannnz1.morris.engine.BoardPosition;
 import io.github.hannnz1.morris.engine.GameAction;
 import io.github.hannnz1.morris.engine.GameEngine;
@@ -33,6 +36,8 @@ import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
+import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -44,7 +49,8 @@ public class GameSessionService {
 
     private static final org.slf4j.Logger LOGGER = org.slf4j.LoggerFactory.getLogger(GameSessionService.class);
     private static final List<String> ACTIVE_STATUSES = List.of("WAITING_FOR_PLAYER", "IN_PROGRESS");
-    private static final List<String> FINISHED_STATUSES = List.of("WHITE_WON", "BLACK_WON");
+    private static final List<String> FINISHED_STATUSES = List.of("WHITE_WON", "BLACK_WON", "DRAWN", "ABORTED", "CANCELLED");
+    private static final int MAX_DRAW_OFFERS = 3;
 
     private final GameSessionRepository games;
     private final IdempotencyRecordRepository idempotencyRecords;
@@ -55,6 +61,9 @@ public class GameSessionService {
     private final RoomCodeGenerator roomCodes;
     private final PlayerIdempotencyRecordRepository playerIdempotencyRecords;
     private final RateLimiter rateLimiter;
+    private final Clock clock;
+    private final GameFinisher finisher;
+    private final PlayerRepository playerRepository;
 
     public GameSessionService(GameSessionRepository games,
                               IdempotencyRecordRepository idempotencyRecords,
@@ -64,7 +73,10 @@ public class GameSessionService {
                               SeatResolver seatResolver,
                               RoomCodeGenerator roomCodes,
                               PlayerIdempotencyRecordRepository playerIdempotencyRecords,
-                              RateLimiter rateLimiter) {
+                              RateLimiter rateLimiter,
+                              Clock clock,
+                              GameFinisher finisher,
+                              PlayerRepository playerRepository) {
         this.games = games;
         this.idempotencyRecords = idempotencyRecords;
         this.tokens = tokens;
@@ -74,12 +86,15 @@ public class GameSessionService {
         this.roomCodes = roomCodes;
         this.playerIdempotencyRecords = playerIdempotencyRecords;
         this.rateLimiter = rateLimiter;
+        this.clock = clock;
+        this.finisher = finisher;
+        this.playerRepository = playerRepository;
     }
 
     @Transactional
     public CreateGameResponse create(CreateGameRequest request) {
         String whiteToken = tokens.generate();
-        Instant now = Instant.now();
+        Instant now = clock.instant();
         GameState state = GameEngine.newGame().state();
         GameSessionEntity entity = new GameSessionEntity(
                 UUID.randomUUID(), request.whitePlayer().trim(),
@@ -122,7 +137,7 @@ public class GameSessionService {
             throw new ApiException(HttpStatus.CONFLICT, "GAME_ALREADY_FULL",
                     "The game already has two players");
         }
-        entity.joinBlackPlayer(request.blackPlayer().trim(), tokens.hash(blackToken), Instant.now());
+        entity.joinBlackPlayer(request.blackPlayer().trim(), tokens.hash(blackToken), clock.instant());
         entity = games.saveAndFlush(entity);
         GameResponse response = toResponse(entity, readState(entity));
         publishAfterCommit(id, response);
@@ -131,7 +146,8 @@ public class GameSessionService {
     }
 
     @Transactional
-    public CreateGameResponse createForPlayer(PlayerEntity white, String idempotencyKey) {
+    public CreateGameResponse createForPlayer(PlayerEntity white, String idempotencyKey, String timeControlLabel) {
+        TimeControl timeControl = TimeControl.parse(timeControlLabel); // validate before any side effect
         // 20/min per player, per spec §3.5. Checked before the idempotency lookup so a retried
         // request under the same key is never itself penalized twice for the same logical create.
         if (!rateLimiter.tryAcquire("game-create:" + white.getId(), 20, java.time.Duration.ofMinutes(1))) {
@@ -151,12 +167,13 @@ public class GameSessionService {
             throw new ApiException(HttpStatus.CONFLICT, "TOO_MANY_ACTIVE_GAMES", "You already have 5 active or waiting games");
         }
 
-        Instant now = Instant.now();
+        Instant now = clock.instant();
         GameState state = GameEngine.newGame().state();
         GameSessionEntity entity = new GameSessionEntity(UUID.randomUUID(), white.getNickname(), null,
                 null, null, "WAITING_FOR_PLAYER", writeJson(state), now);
         entity.assignPlayers(white.getId(), null);
         entity.assignRoomCode(generateUniqueRoomCode());
+        entity.setTimeControl(timeControl.baseMs(), timeControl.incrementMs()); // stores base/increment only; clock doesn't start until join
         entity = games.saveAndFlush(entity);
 
         CreateGameResponse response = new CreateGameResponse(toResponse(entity, state), null, entity.getRoomCode());
@@ -168,6 +185,9 @@ public class GameSessionService {
     @Transactional(isolation = Isolation.READ_COMMITTED)
     public JoinGameResponse joinByBearer(UUID id, PlayerEntity black, String idempotencyKey) {
         String fingerprint = tokens.hash(black.getId() + ":join:" + id + ":" + idempotencyKey);
+        // Pattern A: lock first, so a concurrent retry under the same key serializes behind the
+        // first request and then replays its committed record.
+        GameSessionEntity entity = findGameForUpdate(id);
         var previous = playerIdempotencyRecords.findByIdPlayerIdAndIdIdempotencyKey(black.getId(), idempotencyKey);
         if (previous.isPresent()) {
             if (!previous.get().getRequestFingerprint().equals(fingerprint)) {
@@ -176,23 +196,39 @@ public class GameSessionService {
             return readJson(previous.get().getResponseJson(), JoinGameResponse.class);
         }
 
-        GameSessionEntity entity = findGameForUpdate(id);
         if (black.getId().equals(entity.getWhitePlayerId())) {
             throw new ApiException(HttpStatus.CONFLICT, "CANNOT_JOIN_OWN_GAME", "Use a different browser or device to join as the other player");
         }
         if (black.getId().equals(entity.getBlackPlayerId())) {
+            // The seated black player re-entering (e.g. via the room code again): a pure read that
+            // writes nothing, so it is allowed in any status.
             JoinGameResponse response = new JoinGameResponse(toResponse(entity, readState(entity)), null);
             return response;
+        }
+        // Only a game still waiting for its second player can be joined. Without this, a CANCELLED
+        // game (which has no black player) passed the seat check below and was brought back to
+        // life as IN_PROGRESS with a running clock (final-review C2).
+        if (!"WAITING_FOR_PLAYER".equals(entity.getStatus())) {
+            throw new ApiException(HttpStatus.CONFLICT, "GAME_NOT_ACTIVE", "This game can no longer be joined");
         }
         if (entity.getBlackPlayerId() != null || entity.getBlackPlayer() != null) {
             throw new ApiException(HttpStatus.CONFLICT, "GAME_ALREADY_FULL", "The game already has two players");
         }
         entity.assignPlayers(entity.getWhitePlayerId(), black.getId());
-        entity.joinBlackPlayer(black.getNickname(), "", Instant.now());
+        entity.joinBlackPlayer(black.getNickname(), "", clock.instant());
+        // A Bearer game created before M2 shipped has a NULL base_ms/increment_ms (createForPlayer
+        // didn't call setTimeControl yet); fall back to the 5+3 default rather than unboxing null.
+        // Pre-M2 games that were already IN_PROGRESS at deploy are untouched by this method (they
+        // never re-enter join) and stay clockless forever, same as the anonymous join() path, which
+        // never calls startClock at all.
+        if (entity.getBaseMs() == null) {
+            entity.setTimeControl(TimeControl.DEFAULT.baseMs(), TimeControl.DEFAULT.incrementMs());
+        }
+        entity.startClock(entity.getBaseMs(), entity.getIncrementMs(), clock.instant());
         entity = games.saveAndFlush(entity);
         JoinGameResponse response = new JoinGameResponse(toResponse(entity, readState(entity)), null);
         playerIdempotencyRecords.saveAndFlush(new PlayerIdempotencyRecordEntity(
-                black.getId(), idempotencyKey, fingerprint, writeJson(response), Instant.now()));
+                black.getId(), idempotencyKey, fingerprint, writeJson(response), clock.instant()));
         publishAfterCommit(id, response.game());
         return response;
     }
@@ -244,8 +280,14 @@ public class GameSessionService {
         return toResponse(entity, readState(entity));
     }
 
+    // Per spec M2.3: this method never throws to signal a clock-timeout rejection - it returns an
+    // ActionOutcome (rejectedByTimeout = true on that path) after committing the TIMEOUT verdict via
+    // GameFinisher.finish, entirely inside this method's own transaction. GameController.action is
+    // the one that turns rejectedByTimeout into an HTTP 409 GAME_NOT_ACTIVE, by which point this
+    // transaction has already committed - so there is no throw-after-write path in this method that
+    // would need noRollbackFor.
     @Transactional(isolation = Isolation.READ_COMMITTED)
-    public GameResponse performAction(UUID id, String bearerToken, String legacySeatToken, String idempotencyKey,
+    public ActionOutcome performAction(UUID id, String bearerToken, String legacySeatToken, String idempotencyKey,
                                       ActionRequest request) {
         validateIdempotencyKey(idempotencyKey);
         // Mirrors SeatResolver.resolve's own branch-selection predicate exactly (usable: non-blank
@@ -265,12 +307,33 @@ public class GameSessionService {
                 throw new ApiException(HttpStatus.CONFLICT, "IDEMPOTENCY_KEY_REUSED",
                         "This idempotency key was already used for a different request");
             }
-            return readJson(previous.get().getResponseJson(), GameResponse.class);
+            // The stored JSON is an ActionOutcome (not a bare GameResponse) precisely so a retried
+            // request after a timeout rejection replays as rejectedByTimeout = true too, not a 200.
+            ActionOutcome outcome = readJson(previous.get().getResponseJson(), ActionOutcome.class);
+            if (outcome.game() == null) {
+                // idempotency_records has existed since V1: a record written before this ActionOutcome
+                // wrapper shipped holds a bare GameResponse. Jackson silently ignores the unknown
+                // "game"/"rejectedByTimeout" properties and would otherwise hand back
+                // ActionOutcome(null, false) - a 200 with an empty body. Re-read the same JSON as the
+                // old shape and wrap it instead.
+                outcome = new ActionOutcome(readJson(previous.get().getResponseJson(), GameResponse.class), false);
+            }
+            return outcome;
         }
 
-        if (entity.getBlackPlayer() == null) {
+        // Decided by status, not by "black seat empty": a CANCELLED game also has no black player,
+        // and must report GAME_NOT_ACTIVE rather than WAITING_FOR_PLAYER (final-review M-h).
+        if ("WAITING_FOR_PLAYER".equals(entity.getStatus())) {
             throw new ApiException(HttpStatus.CONFLICT, "WAITING_FOR_PLAYER",
                     "A second player must join before the game can start");
+        }
+        // Guards against re-entering the clock-timeout/mill/no-moves branches below a second time
+        // for a game GameFinisher.finish already closed out: after a TIMEOUT or ABORTED finish,
+        // state_json still has no engine winner and turnDeadlineAt stays in the past, so a fresh
+        // request (new idempotency key, current version) would otherwise re-enter the timeout check
+        // and call finisher.finish again, rewriting the result and re-broadcasting it.
+        if (!"IN_PROGRESS".equals(entity.getStatus())) {
+            throw new ApiException(HttpStatus.CONFLICT, "GAME_NOT_ACTIVE", "This game is not in progress");
         }
         GameState currentState = readState(entity);
         if (request.expectedVersion() != entity.getVersion()) {
@@ -282,16 +345,373 @@ public class GameSessionService {
                     "Only the current player can perform this action");
         }
 
+        // Clock settlement, per spec M2.3's pseudocode. entity.getTurnDeadlineAt() is null only for
+        // a pre-M2 game (legacy anonymous create/join never calls startClock) - such games have no
+        // clock at all and skip this whole block.
+        boolean hasClock = entity.getTurnDeadlineAt() != null;
+        boolean whiteToMove = player == Player.WHITE;
+        long elapsedMs = 0;
+        long remainingBefore = 0;
+        if (hasClock) {
+            Instant timeoutCheckNow = clock.instant();
+            if (!timeoutCheckNow.isBefore(entity.getTurnDeadlineAt())) {
+                // The mover's own clock had already reached zero before this action arrived: the
+                // action is never applied. Per spec M2.3's first-move grace, a late FIRST move ends
+                // the game as ABORTED (winner null) rather than a TIMEOUT loss - ClockTimeoutOutcome
+                // is the single place that decision is made, shared with Task 6's background
+                // TimeoutScanner so the two paths can never disagree. finisher.finish commits the
+                // verdict inside this transaction either way; rejectedByTimeout = true tells
+                // GameController.action to turn this into an HTTP 409 GAME_NOT_ACTIVE, per spec
+                // M2.3's "服务方法返回一个「结果对象」,由 Controller 转换为 409 响应,而不是在事务内抛异常".
+                var expiry = ClockTimeoutOutcome.forExpiry(currentState);
+                GameResponse timedOut = finisher.finish(entity, expiry.winner(), expiry.reason());
+                ActionOutcome outcome = new ActionOutcome(timedOut, true);
+                idempotencyRecords.saveAndFlush(new IdempotencyRecordEntity(
+                        UUID.randomUUID(), id, idempotencyKey, fingerprint, writeJson(outcome), timeoutCheckNow));
+                return outcome;
+            }
+            elapsedMs = Duration.between(entity.getTurnStartedAt(), timeoutCheckNow).toMillis();
+            remainingBefore = whiteToMove ? entity.getWhiteRemainingMs() : entity.getBlackRemainingMs();
+        }
+        long remainingAfter = remainingBefore - elapsedMs;
+
         GameState nextState = GameEngine.restore(currentState)
                 .apply(new GameAction(request.type(), request.from(), request.to()));
-        entity.updateState(statusOf(nextState), writeJson(nextState), Instant.now());
+
+        if (nextState.winner() != null || nextState.drawReason() != null) {
+            entity.updateState(statusOf(nextState), writeJson(nextState), clock.instant());
+            entity = games.saveAndFlush(entity);
+            // currentState (not the just-stored nextState) tells the finisher whose clock was
+            // running: after a winning or drawing move, nextState's side to move may already be the
+            // opponent, but the elapsed turn time belongs to the mover.
+            GameResponse finishedResponse = finisher.finish(entity, nextState.winner(),
+                    nextState.winner() != null ? engineWinReason(nextState) : nextState.drawReason(),
+                    currentState);
+            ActionOutcome outcome = new ActionOutcome(finishedResponse, false);
+            idempotencyRecords.saveAndFlush(new IdempotencyRecordEntity(
+                    UUID.randomUUID(), id, idempotencyKey, fingerprint, writeJson(outcome), clock.instant()));
+            return outcome;
+        }
+
+        if (hasClock) {
+            boolean handoff = nextState.currentPlayer() != currentState.currentPlayer(); // turn passed, not still removing
+            // Per spec M2.3: a side's own first move (piecesToPlace == 9 in the state before that
+            // move) deducts no main time and adds no increment - the mover's remaining time stays at
+            // baseMs (remainingBefore, since nothing has been subtracted from it yet). A first move
+            // can never form a mill, so this branch and the terminal one above never overlap.
+            boolean moverFirstMove = currentState.piecesToPlace(player) == 9;
+            long settledMs = moverFirstMove ? remainingBefore
+                    : (handoff ? remainingAfter + entity.getIncrementMs() : remainingAfter);
+            long opponentRemaining = whiteToMove ? entity.getBlackRemainingMs() : entity.getWhiteRemainingMs();
+            // When the turn hands off to a side about to make ITS first move, that side's deadline is
+            // now + 30s grace (not its remaining time), per spec M2.3 - independent of whether the
+            // mover who just moved was itself in its own first move.
+            boolean nextIsFirstMove = handoff && nextState.piecesToPlace(nextState.currentPlayer()) == 9;
+            long nextDeadlineBudgetMs = !handoff ? settledMs : (nextIsFirstMove ? 30_000L : opponentRemaining);
+            if (whiteToMove) {
+                entity.settleClock(settledMs, entity.getBlackRemainingMs(), clock.instant(), nextDeadlineBudgetMs);
+            } else {
+                entity.settleClock(entity.getWhiteRemainingMs(), settledMs, clock.instant(), nextDeadlineBudgetMs);
+            }
+        }
+
+        // Per spec M2.6 ("对方走了一步,就视为拒绝"): a legally-applied move by either side auto-clears
+        // any pending draw offer while the game continues. A pending offer only ever belongs to one
+        // side, so this covers both the responder playing on (declining) and the offerer themselves
+        // moving after their own offer.
+        if (entity.getDrawOfferedBy() != null) {
+            entity.clearDrawOffer();
+        }
+
+        entity.updateState(statusOf(nextState), writeJson(nextState), clock.instant());
         entity = games.saveAndFlush(entity);
         GameResponse response = toResponse(entity, nextState);
+        ActionOutcome outcome = new ActionOutcome(response, false);
 
         idempotencyRecords.saveAndFlush(new IdempotencyRecordEntity(
-                UUID.randomUUID(), id, idempotencyKey, fingerprint, writeJson(response), Instant.now()));
+                UUID.randomUUID(), id, idempotencyKey, fingerprint, writeJson(outcome), clock.instant()));
+        publishAfterCommit(id, response);
+        return outcome;
+    }
+
+    // Resign accepts only the Bearer credential (legacySeatToken passed as null to SeatResolver):
+    // pre-M1 anonymous games have no player ids, so those callers get 403 INVALID_PLAYER_TOKEN,
+    // per the plan's Global Constraints. The idempotency fingerprint's ":resign:" segment is a
+    // discriminator that keeps a key reused across /resign, /cancel, or /actions from ever
+    // replaying the wrong stored shape - it fails the fingerprint match instead.
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public GameResponse resign(UUID id, String bearerToken, String idempotencyKey) {
+        validateIdempotencyKey(idempotencyKey);
+        String fingerprint = tokens.hash(bearerToken + ":resign:" + idempotencyKey);
+        GameSessionEntity entity = findGameForUpdate(id);
+        Player player = seatResolver.resolve(entity, bearerToken, null);
+
+        var previous = idempotencyRecords.findByGameIdAndIdempotencyKey(id, idempotencyKey);
+        if (previous.isPresent()) {
+            if (!previous.get().getRequestFingerprint().equals(fingerprint)) {
+                throw new ApiException(HttpStatus.CONFLICT, "IDEMPOTENCY_KEY_REUSED",
+                        "This idempotency key was already used for a different request");
+            }
+            return readJson(previous.get().getResponseJson(), GameResponse.class);
+        }
+        if (!"IN_PROGRESS".equals(entity.getStatus())) {
+            throw new ApiException(HttpStatus.CONFLICT, "GAME_NOT_ACTIVE", "The game is not active");
+        }
+
+        // GameFinisher.finish already commits (saveAndFlush) and schedules the WebSocket broadcast
+        // after commit itself - resign must not go through any other write path per the plan's
+        // Global Constraints.
+        GameResponse response = finisher.finish(entity, player.opponent(), "RESIGN");
+        idempotencyRecords.saveAndFlush(new IdempotencyRecordEntity(
+                UUID.randomUUID(), id, idempotencyKey, fingerprint, writeJson(response), clock.instant()));
+        return response;
+    }
+
+    // Cancel accepts only the Bearer credential (legacySeatToken passed as null), same as resign.
+    // Only the creator (WHITE) may cancel, and only while the game is still WAITING_FOR_PLAYER -
+    // once black has joined, the game must be resigned or played out, not cancelled. Cancel
+    // deliberately does NOT go through GameFinisher: a cancelled game never reached IN_PROGRESS, so
+    // it has no result to record (see GameSessionEntity.cancel).
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public GameResponse cancel(UUID id, String bearerToken, String idempotencyKey) {
+        validateIdempotencyKey(idempotencyKey);
+        String fingerprint = tokens.hash(bearerToken + ":cancel:" + idempotencyKey);
+        GameSessionEntity entity = findGameForUpdate(id);
+        Player player = seatResolver.resolve(entity, bearerToken, null);
+        if (player != Player.WHITE) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "INVALID_PLAYER_TOKEN", "Only the creator can cancel");
+        }
+
+        var previous = idempotencyRecords.findByGameIdAndIdempotencyKey(id, idempotencyKey);
+        if (previous.isPresent()) {
+            if (!previous.get().getRequestFingerprint().equals(fingerprint)) {
+                throw new ApiException(HttpStatus.CONFLICT, "IDEMPOTENCY_KEY_REUSED",
+                        "This idempotency key was already used for a different request");
+            }
+            return readJson(previous.get().getResponseJson(), GameResponse.class);
+        }
+        if (!"WAITING_FOR_PLAYER".equals(entity.getStatus())) {
+            throw new ApiException(HttpStatus.CONFLICT, "GAME_NOT_ACTIVE", "The game already has a second player");
+        }
+
+        entity.cancel(clock.instant());
+        entity = games.saveAndFlush(entity);
+        GameResponse response = toResponse(entity, readState(entity));
+        idempotencyRecords.saveAndFlush(new IdempotencyRecordEntity(
+                UUID.randomUUID(), id, idempotencyKey, fingerprint, writeJson(response), clock.instant()));
         publishAfterCommit(id, response);
         return response;
+    }
+
+    // Draw offer/accept/decline accepts only the Bearer credential (legacySeatToken passed as
+    // null), same as resign/cancel. The fingerprint's ":draw:" discriminator plus the action keeps
+    // a key reused across /draw, /resign, /cancel, or /actions from ever replaying the wrong stored
+    // shape - it fails the fingerprint match instead. The idempotency replay happens before the
+    // IN_PROGRESS status check (per spec Pattern A) so a retried request against an already-finished
+    // (e.g. drawn) game still replays its original 200 instead of a fresh 409.
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public GameResponse offerDraw(UUID id, String bearerToken, String idempotencyKey, String action) {
+        validateIdempotencyKey(idempotencyKey);
+        String fingerprint = tokens.hash(bearerToken + ":draw:" + idempotencyKey + ":" + action);
+        GameSessionEntity entity = findGameForUpdate(id);
+        Player player = seatResolver.resolve(entity, bearerToken, null);
+        String side = player.name();
+        String opponentSide = player.opponent().name();
+
+        var previous = idempotencyRecords.findByGameIdAndIdempotencyKey(id, idempotencyKey);
+        if (previous.isPresent()) {
+            if (!previous.get().getRequestFingerprint().equals(fingerprint)) {
+                throw new ApiException(HttpStatus.CONFLICT, "IDEMPOTENCY_KEY_REUSED",
+                        "This idempotency key was already used for a different request");
+            }
+            return readJson(previous.get().getResponseJson(), GameResponse.class);
+        }
+        if (!"IN_PROGRESS".equals(entity.getStatus())) {
+            throw new ApiException(HttpStatus.CONFLICT, "GAME_NOT_ACTIVE", "The game is not active");
+        }
+
+        GameResponse response = switch (action) {
+            case "OFFER" -> {
+                if (entity.hasPendingDrawOfferFrom(opponentSide)) {
+                    // Both sides offered around the same time; the second request serializes behind
+                    // the row lock and sees the first offer already pending - treat it as an accept.
+                    yield finishAsDraw(entity);
+                }
+                if (entity.hasPendingDrawOfferFrom(side)) {
+                    yield toResponse(entity, readState(entity)); // idempotent no-op, already offered
+                }
+                if (entity.drawOffersUsedBy(side) >= MAX_DRAW_OFFERS) {
+                    throw new ApiException(HttpStatus.CONFLICT, "OFFER_LIMIT_REACHED",
+                            "You have already offered a draw the maximum number of times");
+                }
+                entity.offerDraw(side, clock.instant());
+                entity = games.saveAndFlush(entity);
+                GameResponse offered = toResponse(entity, readState(entity));
+                publishAfterCommit(id, offered);
+                yield offered;
+            }
+            case "ACCEPT" -> {
+                if (!entity.hasPendingDrawOfferFrom(opponentSide)) {
+                    throw new ApiException(HttpStatus.CONFLICT, "NO_PENDING_OFFER", "There is no pending draw offer to accept");
+                }
+                yield finishAsDraw(entity);
+            }
+            case "DECLINE" -> {
+                if (!entity.hasPendingDrawOfferFrom(opponentSide)) {
+                    throw new ApiException(HttpStatus.CONFLICT, "NO_PENDING_OFFER", "There is no pending draw offer to decline");
+                }
+                entity.clearDrawOffer();
+                entity = games.saveAndFlush(entity);
+                GameResponse declined = toResponse(entity, readState(entity));
+                publishAfterCommit(id, declined);
+                yield declined;
+            }
+            default -> throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "action must be OFFER, ACCEPT, or DECLINE");
+        };
+
+        idempotencyRecords.saveAndFlush(new IdempotencyRecordEntity(
+                UUID.randomUUID(), id, idempotencyKey, fingerprint, writeJson(response), clock.instant()));
+        return response;
+    }
+
+    // ACCEPT (and the "both sides offered at once" OFFER-treated-as-accept branch) finish through
+    // GameFinisher.finish, which is the only terminal-write path - it already commits (saveAndFlush)
+    // and schedules the post-commit WebSocket broadcast itself, so offerDraw's own
+    // idempotencyRecords.saveAndFlush below still runs (to record the *draw offer's* idempotency
+    // key against the terminal response), but must not publish a second time.
+    private GameResponse finishAsDraw(GameSessionEntity entity) {
+        return finisher.finish(entity, null, "DRAW_AGREED");
+    }
+
+    // Rematch accepts only the Bearer credential (legacySeatToken passed as null), same as
+    // resign/draw. The fingerprint's ":rematch:" discriminator plus the action keeps a key reused
+    // across /rematch, /draw, /resign, or /actions from ever replaying the wrong stored shape.
+    // Ordering (Pattern A, mirrors offerDraw): validate key -> fingerprint -> lock row -> resolve
+    // seat -> idempotency replay -> eligibility -> action logic -> idempotency record write.
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public GameResponse offerRematch(UUID id, String bearerToken, String idempotencyKey, String action) {
+        validateIdempotencyKey(idempotencyKey);
+        String fingerprint = tokens.hash(bearerToken + ":rematch:" + idempotencyKey + ":" + action);
+        GameSessionEntity entity = findGameForUpdate(id);
+        Player player = seatResolver.resolve(entity, bearerToken, null);
+        String side = player.name();
+        String opponentSide = player.opponent().name();
+
+        var previous = idempotencyRecords.findByGameIdAndIdempotencyKey(id, idempotencyKey);
+        if (previous.isPresent()) {
+            if (!previous.get().getRequestFingerprint().equals(fingerprint)) {
+                throw new ApiException(HttpStatus.CONFLICT, "IDEMPOTENCY_KEY_REUSED",
+                        "This idempotency key was already used for a different request");
+            }
+            return readJson(previous.get().getResponseJson(), GameResponse.class);
+        }
+        // Once a rematch game already exists, any further call (from either side, any action)
+        // replays the original's current response idempotently, per spec M2.6 - this check runs
+        // before the eligibility checks below, since a finished+linked original would otherwise
+        // fail the (still-applicable) status/window checks even though the rematch already happened.
+        if (entity.getRematchGameId() != null) {
+            GameResponse existing = toResponse(entity, readState(entity));
+            idempotencyRecords.saveAndFlush(new IdempotencyRecordEntity(
+                    UUID.randomUUID(), id, idempotencyKey, fingerprint, writeJson(existing), clock.instant()));
+            return existing;
+        }
+        if (!List.of("WHITE_WON", "BLACK_WON", "DRAWN").contains(entity.getStatus())
+                || entity.getWhitePlayerId() == null || entity.getBlackPlayerId() == null
+                || entity.getFinishedAt() == null
+                || !clock.instant().isBefore(entity.getFinishedAt().plus(Duration.ofMinutes(5)))) {
+            throw new ApiException(HttpStatus.CONFLICT, "GAME_NOT_ACTIVE", "This game cannot be rematched");
+        }
+
+        GameResponse response = switch (action) {
+            case "OFFER" -> {
+                if (entity.hasPendingRematchOfferFrom(opponentSide)) {
+                    // Both sides asked for a rematch around the same time; the second request
+                    // serializes behind the row lock and sees the first offer already pending -
+                    // treat it as an accept so exactly one new game is created.
+                    yield createRematchGame(entity);
+                }
+                if (entity.hasPendingRematchOfferFrom(side)) {
+                    yield toResponse(entity, readState(entity)); // idempotent no-op, already offered
+                }
+                entity.offerRematch(side, clock.instant());
+                entity = games.saveAndFlush(entity);
+                GameResponse offered = toResponse(entity, readState(entity));
+                publishAfterCommit(id, offered);
+                yield offered;
+            }
+            case "ACCEPT" -> {
+                if (!entity.hasPendingRematchOfferFrom(opponentSide)) {
+                    throw new ApiException(HttpStatus.CONFLICT, "NO_PENDING_OFFER", "There is no pending rematch offer to accept");
+                }
+                yield createRematchGame(entity);
+            }
+            case "DECLINE" -> {
+                if (!entity.hasPendingRematchOfferFrom(opponentSide)) {
+                    throw new ApiException(HttpStatus.CONFLICT, "NO_PENDING_OFFER", "There is no pending rematch offer to decline");
+                }
+                entity.offerRematch(null, clock.instant());
+                entity = games.saveAndFlush(entity);
+                GameResponse declined = toResponse(entity, readState(entity));
+                publishAfterCommit(id, declined);
+                yield declined;
+            }
+            default -> throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "action must be OFFER, ACCEPT, or DECLINE");
+        };
+
+        idempotencyRecords.saveAndFlush(new IdempotencyRecordEntity(
+                UUID.randomUUID(), id, idempotencyKey, fingerprint, writeJson(response), clock.instant()));
+        return response;
+    }
+
+    // Creates the rematch game in the same transaction as the caller (offerRematch), so throwing
+    // (e.g. TOO_MANY_ACTIVE_GAMES) rolls back any partial write and leaves the original's
+    // rematchOfferedBy untouched, per spec ("旧对局的 OFFER 保持不变"). Colors swap unconditionally:
+    // the new game's WHITE is whoever was BLACK in the original, and vice versa - this holds no
+    // matter which side calls ACCEPT, or which side's OFFER triggers the "both offered" path, so it
+    // does not depend on `acceptingPlayer` at all.
+    private GameResponse createRematchGame(GameSessionEntity original) {
+        PlayerEntity newWhite = playerByIdOrThrow(original.getBlackPlayerId());
+        PlayerEntity newBlack = playerByIdOrThrow(original.getWhitePlayerId());
+
+        long whiteActiveGames = games.countActiveGamesForPlayer(newWhite.getId(), ACTIVE_STATUSES);
+        long blackActiveGames = games.countActiveGamesForPlayer(newBlack.getId(), ACTIVE_STATUSES);
+        if (whiteActiveGames >= 5 || blackActiveGames >= 5) {
+            throw new ApiException(HttpStatus.CONFLICT, "TOO_MANY_ACTIVE_GAMES",
+                    "A player already has 5 active or waiting games");
+        }
+
+        TimeControl timeControl = original.getBaseMs() != null && original.getIncrementMs() != null
+                ? new TimeControl(original.getBaseMs(), original.getIncrementMs())
+                : TimeControl.DEFAULT;
+
+        GameState state = GameEngine.newGame().state();
+        Instant now = clock.instant();
+        GameSessionEntity newGame = new GameSessionEntity(UUID.randomUUID(), newWhite.getNickname(),
+                newBlack.getNickname(), null, null, "IN_PROGRESS", writeJson(state), now);
+        newGame.assignPlayers(newWhite.getId(), newBlack.getId());
+        newGame.assignRoomCode(generateUniqueRoomCode());
+        newGame.setTimeControl(timeControl.baseMs(), timeControl.incrementMs());
+        newGame.startClock(timeControl.baseMs(), timeControl.incrementMs(), now); // White's 30s first-move grace starts immediately
+        newGame = games.saveAndFlush(newGame);
+
+        original.linkRematchGame(newGame.getId(), now);
+        original = games.saveAndFlush(original);
+
+        GameResponse newGameResponse = toResponse(newGame, state);
+        publishAfterCommit(newGame.getId(), newGameResponse);
+        GameResponse originalResponse = toResponse(original, readState(original));
+        publishAfterCommit(original.getId(), originalResponse); // so the original game's viewers see rematchGameId too
+        return originalResponse; // caller reads rematchGameId from this
+    }
+
+    private PlayerEntity playerByIdOrThrow(UUID playerId) {
+        return playerRepository.findById(playerId)
+                .orElseThrow(() -> new IllegalStateException("Player referenced by a game no longer exists: " + playerId));
+    }
+
+    private String engineWinReason(GameState state) {
+        Player loser = state.winner().opponent();
+        return state.piecesOnBoard(loser) < 3 ? "NO_PIECES" : "NO_MOVES";
     }
 
     private GameSessionEntity findGame(UUID id) {
@@ -312,11 +732,35 @@ public class GameSessionService {
         return new GameResponse(entity.getId(), entity.getVersion(), entity.getWhitePlayer(),
                 entity.getBlackPlayer(), entity.getStatus(), state.phase(), state,
                 List.copyOf(engine.legalPlacements()), legalMoves, List.copyOf(engine.removablePieces()),
-                entity.getCreatedAt(), entity.getUpdatedAt());
+                entity.getCreatedAt(), entity.getUpdatedAt(), clockView(entity),
+                entity.getDrawOfferedBy(), resultView(entity),
+                entity.getRematchOfferedBy(), entity.getRematchGameId(),
+                entity.getWhitePlayerId(), entity.getBlackPlayerId());
+    }
+
+    private ResultView resultView(GameSessionEntity entity) {
+        if (entity.getResultReason() == null) {
+            return null;
+        }
+        return new ResultView(entity.getResultWinner(), entity.getResultReason());
+    }
+
+    private ClockView clockView(GameSessionEntity entity) {
+        if (entity.getTurnDeadlineAt() == null) {
+            return new ClockView(0, 0, false, clock.instant(), null); // pre-clock game (WAITING, or pre-M2)
+        }
+        return new ClockView(entity.getWhiteRemainingMs(), entity.getBlackRemainingMs(),
+                "IN_PROGRESS".equals(entity.getStatus()), clock.instant(), entity.getTurnDeadlineAt());
     }
 
     private GameState readState(GameSessionEntity entity) {
         return readJson(entity.getStateJson(), GameState.class);
+    }
+
+    // Package-visible wrapper around readState so TimeoutScanner can obtain the GameState it needs
+    // to call ClockTimeoutOutcome.forExpiry without a second Jackson deserialization path (Task 6).
+    GameState stateOf(GameSessionEntity entity) {
+        return readState(entity);
     }
 
     private String statusOf(GameState state) {

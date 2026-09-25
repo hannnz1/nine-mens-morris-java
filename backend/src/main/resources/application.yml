@@ -31,6 +31,10 @@ spring:
     baseline-version: 1
   lifecycle:
     timeout-per-shutdown-phase: 20s
+  task:
+    scheduling:
+      pool:
+        size: 4
 
 management:
   endpoints:

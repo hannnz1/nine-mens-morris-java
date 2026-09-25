@@ -36,9 +36,16 @@ class GameApiIntegrationTest extends PostgresIntegrationTest {
     @Autowired
     private GameSessionRepository games;
 
+    @Autowired
+    private org.springframework.jdbc.core.JdbcTemplate jdbc;
+
     @BeforeEach
     void cleanDatabase() {
         idempotencyRecords.deleteAll();
+        // rematch_game_id is a self-referencing FK (game_sessions -> game_sessions): once
+        // Task 9's rematch flow links a finished game to the rematch it created, deleteAll() can
+        // hit that row before the row that points to it, tripping the FK. Clear the links first.
+        jdbc.update("UPDATE game_sessions SET rematch_game_id = NULL");
         games.deleteAll();
     }
 

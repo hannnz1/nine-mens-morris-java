@@ -41,7 +41,7 @@ public final class GameApiDtos {
     public record PlayerCredential(Player side, String playerName, String token) {
     }
 
-    public record CreateGameRequestForPlayer() {
+    public record CreateGameRequestForPlayer(String timeControl) {
     }
 
     public record CreateGameResponse(
@@ -62,6 +62,9 @@ public final class GameApiDtos {
     ) {
     }
 
+    public record DrawActionRequest(@NotBlank String action) {
+    }
+
     public record GameResponse(
             UUID id,
             long version,
@@ -74,8 +77,24 @@ public final class GameApiDtos {
             Map<BoardPosition, List<BoardPosition>> legalMoves,
             List<BoardPosition> removablePieces,
             Instant createdAt,
-            Instant updatedAt
+            Instant updatedAt,
+            ClockView clock,
+            String drawOfferedBy,
+            ResultView result,
+            String rematchOfferedBy,
+            UUID rematchGameId,
+            // Player identity ids (null for a legacy anonymous seat / an empty seat). Clients work
+            // out their own side by comparing these with their own playerId - never by nickname,
+            // since two identities may share a nickname. Ids grant nothing: auth is by token hash.
+            UUID whitePlayerId,
+            UUID blackPlayerId
     ) {
+    }
+
+    public record ClockView(long whiteMs, long blackMs, boolean running, Instant serverNow, Instant turnDeadlineAt) {
+    }
+
+    public record ResultView(String winner, String reason) {
     }
 
     public record ApiError(

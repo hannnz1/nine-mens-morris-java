@@ -45,7 +45,7 @@
                 <h2>继续上一盘棋</h2>
                 <p>返回入口和临时断网会保留身份。请勿关闭标签页或清除浏览器存储；姓名不能代替凭证。</p>
                 <button class="button button-dark" id="recoverSession" type="button">恢复对局 / 重试加入</button>
-                <button class="text-button" id="clearSession" type="button">永久清除保存的玩家身份</button>
+                <button class="text-button" id="clearSession" type="button">清除本标签页保存的对局</button>
             </div>
             <form class="entry-card entry-card-primary" id="createForm">
                 <div class="entry-number">01</div>
@@ -57,6 +57,14 @@
                 <label>
                     <span>玩家名称</span>
                     <input id="createName" name="whitePlayer" maxlength="50" value="Alice" autocomplete="nickname" required>
+                </label>
+                <label>
+                    <span>时间控制</span>
+                    <select id="createTimeControl" name="timeControl">
+                        <option value="3+2">3+2</option>
+                        <option value="5+3" selected>5+3</option>
+                        <option value="10+5">10+5</option>
+                    </select>
                 </label>
                 <button class="button button-dark" type="submit">创建并进入棋盘 <span>→</span></button>
             </form>
@@ -108,7 +116,21 @@
 
                 <div><dt>当前阶段</dt><dd id="gamePhase">等待开始</dd></div>
                 <div><dt>轮到</dt><dd id="currentPlayer">—</dd></div>
+                <div><dt>对手状态</dt><dd id="opponentPresence">—</dd></div>
             </dl>
+            <p class="operation-notice" id="resultReason" role="status" hidden></p>
+            <div class="game-actions" id="gameActions" hidden>
+                <button class="button button-outline" id="cancelButton" type="button" hidden>取消对局</button>
+                <button class="button button-outline" id="resignButton" type="button" hidden>认输</button>
+                <button class="button button-outline" id="drawOfferButton" type="button" hidden>提和</button>
+                <button class="button button-dark" id="drawAcceptButton" type="button" hidden>接受和棋</button>
+                <button class="button button-quiet" id="drawDeclineButton" type="button" hidden>拒绝和棋</button>
+                <span class="text-button" id="drawStatusText" hidden>已提和，等待对方</span>
+                <button class="button button-dark" id="rematchButton" type="button" hidden>再来一局</button>
+                <button class="button button-dark" id="rematchAcceptButton" type="button" hidden>接受再来一局</button>
+                <button class="button button-quiet" id="rematchDeclineButton" type="button" hidden>拒绝</button>
+                <span class="text-button" id="rematchStatusText" hidden>已提议再来一局，等待对方</span>
+            </div>
             <div class="game-id-block">
                 <span>对局编号</span>
                 <code id="gameIdText">创建对局后显示</code>
@@ -131,6 +153,7 @@
                     <span class="turn-label">下一步</span>
                     <strong id="actionPrompt">创建或加入对局后即可操作</strong>
                 </div>
+                <span class="live-badge" id="clockGrace" hidden></span>
                 <span class="live-badge" id="realtimeBadge" data-state="offline">未连接</span>
             </div>
 
@@ -157,12 +180,12 @@
             <div class="player-card white-player" id="whiteCard">
                 <span class="player-color"></span>
                 <div><small id="whiteRole">白方</small><strong id="whitePlayerName">Alice</strong></div>
-                <div class="piece-stats"><span>待落 <b id="whitePieces">9</b></span><span>在盘 <b id="whiteOnBoard">0</b></span></div>
+                <div class="piece-stats"><span>待落 <b id="whitePieces">9</b></span><span>在盘 <b id="whiteOnBoard">0</b></span><span>棋钟 <b id="whiteClock">--:--</b></span></div>
             </div>
             <div class="player-card black-player" id="blackCard">
                 <span class="player-color"></span>
                 <div><small id="blackRole">黑方</small><strong id="blackPlayerName">等待加入</strong></div>
-                <div class="piece-stats"><span>待落 <b id="blackPieces">9</b></span><span>在盘 <b id="blackOnBoard">0</b></span></div>
+                <div class="piece-stats"><span>待落 <b id="blackPieces">9</b></span><span>在盘 <b id="blackOnBoard">0</b></span><span>棋钟 <b id="blackClock">--:--</b></span></div>
             </div>
             <div class="activity-log-card">
                 <div class="section-heading">

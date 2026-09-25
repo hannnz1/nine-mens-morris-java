@@ -30,7 +30,7 @@ class GameWebSocketHandlerTest {
     private final PlayerRepository players = mock(PlayerRepository.class);
     private final SeatResolver seatResolver = new SeatResolver(tokens, players);
     private final ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
-    private final GameWebSocketHandler handler = new GameWebSocketHandler(games, seatResolver, mapper);
+    private final GameWebSocketHandler handler = new GameWebSocketHandler(games, seatResolver, mapper, java.time.Clock.systemUTC());
     private final UUID gameId = UUID.randomUUID();
 
     @AfterEach void close() { handler.shutdown(); }
@@ -169,11 +169,18 @@ class GameWebSocketHandlerTest {
 
     private void subscribe(WebSocketSession session, UUID id, String token) throws Exception {
         handler.handleTextMessage(session, new TextMessage(subscription(id, token)));
+        // Presence broadcasts/snapshots triggered by SUBSCRIBE are now enqueued to a dedicated
+        // executor rather than sent inline (round 3 fix for a lock-order-inversion deadlock), so
+        // tests that assert exact sendMessage() call counts must wait for that queue to drain
+        // first - otherwise a presence send can land after clearInvocations() and inflate a count.
+        handler.awaitPresenceSends();
     }
 
     private GameResponse response(long version) {
         var state = GameEngine.newGame().state();
         return new GameResponse(gameId, version, "Alice", "Bob", "IN_PROGRESS", state.phase(), state,
-                List.of(), Map.of(), List.of(), Instant.now(), Instant.now());
+                List.of(), Map.of(), List.of(), Instant.now(), Instant.now(),
+                new io.github.hannnz1.morris.backend.api.GameApiDtos.ClockView(0, 0, false, Instant.now(), null),
+                null, null, null, null, null, null);
     }
 }

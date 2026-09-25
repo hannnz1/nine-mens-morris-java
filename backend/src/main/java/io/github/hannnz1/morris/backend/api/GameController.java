@@ -2,13 +2,16 @@ package io.github.hannnz1.morris.backend.api;
 
 import io.github.hannnz1.morris.backend.api.GameApiDtos.ActionRequest;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.CreateGameRequest;
+import io.github.hannnz1.morris.backend.api.GameApiDtos.DrawActionRequest;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.CreateGameResponse;
+import io.github.hannnz1.morris.backend.api.GameApiDtos.CreateGameRequestForPlayer;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.GameResponse;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.JoinGameRequest;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.JoinGameResponse;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.FieldError;
 import io.github.hannnz1.morris.backend.service.GameSessionService;
 import io.github.hannnz1.morris.backend.service.PlayerService;
+import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.validation.ConstraintViolation;
 import jakarta.validation.Valid;
 import jakarta.validation.Validator;
@@ -43,21 +46,26 @@ public class GameController {
     @ResponseStatus(HttpStatus.CREATED)
     public CreateGameResponse create(@RequestHeader(value = "Authorization", required = false) String authorization,
                                      @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
-                                     @RequestBody(required = false) CreateGameRequest legacyRequest) {
+                                     // Bound as a raw JsonNode (not CreateGameRequest directly): the Bearer path's body
+                                     // carries a different shape (CreateGameRequestForPlayer's timeControl) than the
+                                     // legacy anonymous path's (CreateGameRequest's whitePlayer), and Spring only reads
+                                     // the request body once, so both branches extract their own fields from the same
+                                     // parsed JSON below.
+                                     @RequestBody(required = false) JsonNode body) {
         if (authorization != null && authorization.startsWith("Bearer ")) {
             if (idempotencyKey == null || idempotencyKey.isBlank() || idempotencyKey.length() > 100) {
                 throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "Idempotency-Key is required");
             }
-            return gameSessions.createForPlayer(players.requirePlayer(authorization.substring(7)), idempotencyKey);
+            CreateGameRequestForPlayer request = new CreateGameRequestForPlayer(textOrNull(body, "timeControl"));
+            return gameSessions.createForPlayer(players.requirePlayer(authorization.substring(7)), idempotencyKey,
+                    request.timeControl());
         }
         // No Authorization header: preserve the pre-M1 anonymous create flow for in-flight legacy
         // clients. @Valid can't be declared on the shared request parameter above (an empty {}
         // Bearer-path body would then fail validation before the Bearer branch is even reached),
         // so this branch replicates Spring's own @Valid/MethodArgumentNotValidException handling
         // (same VALIDATION_FAILED code and fieldErrors shape) by validating manually.
-        if (legacyRequest == null) {
-            legacyRequest = new CreateGameRequest(null);
-        }
+        CreateGameRequest legacyRequest = new CreateGameRequest(textOrNull(body, "whitePlayer"));
         var violations = validator.validate(legacyRequest);
         if (!violations.isEmpty()) {
             List<FieldError> fieldErrors = violations.stream()
@@ -66,6 +74,13 @@ public class GameController {
             throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "The request is invalid", fieldErrors);
         }
         return gameSessions.create(legacyRequest);
+    }
+
+    private String textOrNull(JsonNode body, String field) {
+        if (body == null || !body.hasNonNull(field)) {
+            return null;
+        }
+        return body.get(field).asText();
     }
 
     private FieldError toFieldError(ConstraintViolation<?> violation) {
@@ -118,7 +133,45 @@ public class GameController {
             @RequestHeader(value = "X-Player-Token", required = false) String legacyToken,
             @RequestHeader("Idempotency-Key") String idempotencyKey,
             @Valid @RequestBody ActionRequest request) {
-        return gameSessions.performAction(id, bearerToken(authorization), legacyToken, idempotencyKey, request);
+        var outcome = gameSessions.performAction(id, bearerToken(authorization), legacyToken, idempotencyKey, request);
+        // Per spec M2.3, the service already committed the TIMEOUT verdict inside its own
+        // transaction (it never throws to signal this); only here, after that commit, do we turn a
+        // clock-timeout rejection into an HTTP 409. The finished game itself still reaches the
+        // client via the WebSocket broadcast GameFinisher.finish triggers.
+        if (outcome.rejectedByTimeout()) {
+            throw new ApiException(HttpStatus.CONFLICT, "GAME_NOT_ACTIVE", "This player's time expired");
+        }
+        return outcome.game();
+    }
+
+    @PostMapping("/{id}/resign")
+    public GameResponse resign(@PathVariable("id") UUID id,
+                               @RequestHeader(value = "Authorization", required = false) String authorization,
+                               @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
+        return gameSessions.resign(id, bearerToken(authorization), idempotencyKey);
+    }
+
+    @PostMapping("/{id}/cancel")
+    public GameResponse cancel(@PathVariable("id") UUID id,
+                               @RequestHeader(value = "Authorization", required = false) String authorization,
+                               @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
+        return gameSessions.cancel(id, bearerToken(authorization), idempotencyKey);
+    }
+
+    @PostMapping("/{id}/draw")
+    public GameResponse draw(@PathVariable("id") UUID id,
+                             @RequestHeader(value = "Authorization", required = false) String authorization,
+                             @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+                             @Valid @RequestBody DrawActionRequest request) {
+        return gameSessions.offerDraw(id, bearerToken(authorization), idempotencyKey, request.action());
+    }
+
+    @PostMapping("/{id}/rematch")
+    public GameResponse rematch(@PathVariable("id") UUID id,
+                                @RequestHeader(value = "Authorization", required = false) String authorization,
+                                @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+                                @Valid @RequestBody DrawActionRequest request) {
+        return gameSessions.offerRematch(id, bearerToken(authorization), idempotencyKey, request.action());
     }
 
     private String bearerToken(String authorizationHeader) {
