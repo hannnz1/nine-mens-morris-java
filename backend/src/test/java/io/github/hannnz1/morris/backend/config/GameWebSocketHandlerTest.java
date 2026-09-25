@@ -30,7 +30,7 @@ class GameWebSocketHandlerTest {
     private final PlayerRepository players = mock(PlayerRepository.class);
     private final SeatResolver seatResolver = new SeatResolver(tokens, players);
     private final ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
-    private final GameWebSocketHandler handler = new GameWebSocketHandler(games, seatResolver, mapper);
+    private final GameWebSocketHandler handler = new GameWebSocketHandler(games, seatResolver, mapper, java.time.Clock.systemUTC());
     private final UUID gameId = UUID.randomUUID();
 
     @AfterEach void close() { handler.shutdown(); }
