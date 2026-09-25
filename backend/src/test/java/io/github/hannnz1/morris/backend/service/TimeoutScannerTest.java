@@ -55,6 +55,10 @@ class TimeoutScannerTest extends PostgresIntegrationTest {
         GameSessionEntity reloaded = games.findById(game.id()).orElseThrow();
         assertThat(reloaded.getStatus()).isEqualTo("BLACK_WON");
         assertThat(reloaded.getResultReason()).isEqualTo("TIMEOUT");
+        // Final-review I2: the loser's clock stops at 0 (elapsed is capped at the deadline even
+        // though the scan ran 1s late), and the winner's untouched remaining time is unchanged.
+        assertThat(reloaded.getWhiteRemainingMs()).isZero();
+        assertThat(reloaded.getBlackRemainingMs()).isEqualTo(180_000L);
     }
 
     @Test

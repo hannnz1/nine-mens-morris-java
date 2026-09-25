@@ -106,6 +106,84 @@ class ResignAndCancelIntegrationTest extends PostgresIntegrationTest {
         assertThat(getResponse.getBody().get("status")).isEqualTo("BLACK_WON");
     }
 
+    // Final-review C2: joinByBearer used to check only the black seat, so a CANCELLED game (which
+    // has no black player) could be joined and brought back to life as IN_PROGRESS.
+    @Test
+    void joiningACancelledGameIsRejectedAndTheGameStaysCancelled() {
+        var white = createPlayer("Han");
+        var created = createGame(white, "5+3");
+        HttpHeaders cancelHeaders = new HttpHeaders();
+        cancelHeaders.setBearerAuth(white.token());
+        cancelHeaders.set("Idempotency-Key", UUID.randomUUID().toString());
+        var cancelled = rest.exchange(url("/api/v1/games/" + created.gameId() + "/cancel"),
+                HttpMethod.POST, new HttpEntity<>(cancelHeaders), Map.class);
+        assertThat(cancelled.getBody().get("status")).isEqualTo("CANCELLED");
+
+        var intruder = createPlayer("Zhu");
+        HttpHeaders joinHeaders = new HttpHeaders();
+        joinHeaders.setBearerAuth(intruder.token());
+        joinHeaders.set("Idempotency-Key", UUID.randomUUID().toString());
+        joinHeaders.setContentType(MediaType.APPLICATION_JSON);
+        var join = rest.exchange(url("/api/v1/games/" + created.gameId() + "/join"), HttpMethod.POST,
+                new HttpEntity<>(Map.of(), joinHeaders), Map.class);
+
+        assertThat(join.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(join.getBody().get("code")).isEqualTo("GAME_NOT_ACTIVE");
+        var after = rest.getForEntity(url("/api/v1/games/" + created.gameId()), Map.class).getBody();
+        assertThat(after.get("status")).isEqualTo("CANCELLED");
+        assertThat(after.get("blackPlayer")).isNull();
+        assertThat(after.get("blackPlayerId")).isNull();
+        @SuppressWarnings("unchecked")
+        Map<String, Object> clock = (Map<String, Object>) after.get("clock");
+        assertThat(clock.get("running")).isEqualTo(false);
+        assertThat(clock.get("turnDeadlineAt")).isNull();
+    }
+
+    // Final-review M-h: a move on a CANCELLED game used to hit the "black seat empty" check first
+    // and report WAITING_FOR_PLAYER. It must be GAME_NOT_ACTIVE; a genuinely waiting game still
+    // reports WAITING_FOR_PLAYER.
+    @Test
+    void aMoveOnACancelledGameIsGameNotActiveButOnAWaitingGameIsWaitingForPlayer() {
+        var white = createPlayer("Han");
+        var waiting = createGame(white, "5+3");
+        var onWaiting = placeA1(waiting.gameId(), white.token());
+        assertThat(onWaiting.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(onWaiting.getBody().get("code")).isEqualTo("WAITING_FOR_PLAYER");
+
+        HttpHeaders cancelHeaders = new HttpHeaders();
+        cancelHeaders.setBearerAuth(white.token());
+        cancelHeaders.set("Idempotency-Key", UUID.randomUUID().toString());
+        rest.exchange(url("/api/v1/games/" + waiting.gameId() + "/cancel"),
+                HttpMethod.POST, new HttpEntity<>(cancelHeaders), Map.class);
+
+        var onCancelled = placeA1(waiting.gameId(), white.token());
+        assertThat(onCancelled.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(onCancelled.getBody().get("code")).isEqualTo("GAME_NOT_ACTIVE");
+    }
+
+    @Test
+    void gameResponsesCarryBothPlayerIds() {
+        var white = createPlayer("Han");
+        var black = createPlayer("Han"); // same nickname on purpose: ids, not names, tell sides apart
+        var game = createAndJoinGame(white, black);
+
+        var body = rest.getForEntity(url("/api/v1/games/" + game.id()), Map.class).getBody();
+
+        assertThat(body.get("whitePlayerId")).isEqualTo(playerService.getByToken(white.token()).playerId().toString());
+        assertThat(body.get("blackPlayerId")).isEqualTo(playerService.getByToken(black.token()).playerId().toString());
+        assertThat(body.get("whitePlayerId")).isNotEqualTo(body.get("blackPlayerId"));
+    }
+
+    private ResponseEntity<Map> placeA1(UUID gameId, String token) {
+        long version = ((Number) rest.getForEntity(url("/api/v1/games/" + gameId), Map.class).getBody().get("version")).longValue();
+        HttpHeaders headers = new HttpHeaders();
+        headers.setBearerAuth(token);
+        headers.set("Idempotency-Key", UUID.randomUUID().toString());
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        return rest.exchange(url("/api/v1/games/" + gameId + "/actions"), HttpMethod.POST,
+                new HttpEntity<>(Map.of("type", "PLACE", "to", "A1", "expectedVersion", version), headers), Map.class);
+    }
+
     private record TestPlayer(String nickname, String token) {
     }
 

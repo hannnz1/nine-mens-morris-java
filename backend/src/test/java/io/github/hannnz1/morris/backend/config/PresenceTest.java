@@ -196,6 +196,67 @@ class PresenceTest {
                         && payload.contains("\"black\":\"ONLINE\""))).isTrue();
     }
 
+    // Final-review triage of the T10 minor: unregisterPresence used to stamp disconnectedAt even
+    // when the id had already been removed. A presence send that was queued to a connection before
+    // it closed, and that runs (and fails) only after OFFLINE was broadcast, then re-stamped the
+    // side: it read as ONLINE again for 5s and the next sweep broadcast a spurious ONLINE.
+    @Test
+    void aStaleUnregisterAfterOfflineWasBroadcastDoesNotRestampOrFlashOnline() throws Exception {
+        GameWebSocketHandler handler = newHandler();
+        WebSocketSession black = openSession("b1");
+        subscribeAs(handler, black, Player.BLACK);
+
+        // Hold the single presence-sender thread on its next send to Black, so the sends queued
+        // behind it (including one to White) run only after White has closed.
+        CountDownLatch senderHeld = new CountDownLatch(1);
+        CountDownLatch releaseSender = new CountDownLatch(1);
+        AtomicBoolean holdNext = new AtomicBoolean(true);
+        doAnswer(invocation -> {
+            if (holdNext.compareAndSet(true, false)) {
+                senderHeld.countDown();
+                releaseSender.await(5, java.util.concurrent.TimeUnit.SECONDS);
+            }
+            return null;
+        }).when(black).sendMessage(any());
+
+        WebSocketSession white = openSession("w1");
+        when(seatResolver.resolve(any(), any(), any())).thenReturn(Player.WHITE);
+        handler.afterConnectionEstablished(white);
+        // Not subscribeAs(): its awaitPresenceSends() would wait on the held sender.
+        handler.handleTextMessage(white, new TextMessage(
+                "{\"type\":\"SUBSCRIBE\",\"gameId\":\"" + gameId + "\",\"token\":\"" + "x".repeat(43) + "\"}"));
+        assertThat(senderHeld.await(5, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+
+        // White closes while its direct presence snapshot is still queued behind the held send.
+        when(white.isOpen()).thenReturn(false);
+        handler.afterConnectionClosed(white, CloseStatus.NORMAL);
+        clock.advance(Duration.ofSeconds(6));
+        handler.sweepPresence(); // White OFFLINE is broadcast (queued to Black)
+        assertThat(handler.isOnline(gameId, Player.WHITE)).isFalse();
+
+        // The queued send to the closed White connection now runs, finds it closed, and calls
+        // remove() -> unregisterPresence() for an id that is already gone.
+        releaseSender.countDown();
+        handler.awaitPresenceSends();
+        assertThat(handler.isOnline(gameId, Player.WHITE)).isFalse();
+
+        handler.sweepPresence();
+        handler.awaitPresenceSends();
+        assertThat(handler.isOnline(gameId, Player.WHITE)).isFalse();
+        List<String> presenceToBlack = payloadsSentTo(black).stream()
+                .filter(payload -> payload.contains("\"type\":\"PRESENCE\""))
+                .toList();
+        int lastOffline = -1;
+        for (int i = 0; i < presenceToBlack.size(); i++) {
+            if (presenceToBlack.get(i).contains("\"white\":\"OFFLINE\"")) lastOffline = i;
+        }
+        assertThat(lastOffline).as("White's OFFLINE must have been broadcast to Black").isGreaterThanOrEqualTo(0);
+        assertThat(presenceToBlack.subList(lastOffline + 1, presenceToBlack.size()))
+                .as("no spurious ONLINE after OFFLINE")
+                .noneMatch(payload -> payload.contains("\"white\":\"ONLINE\""));
+        assertThat(presenceToBlack.get(presenceToBlack.size() - 1)).contains("\"white\":\"OFFLINE\"");
+    }
+
     @Test
     void bothSidesOfflineWithNoConnectionsAreRemovedFromPresenceMap() throws Exception {
         GameWebSocketHandler handler = newHandler();

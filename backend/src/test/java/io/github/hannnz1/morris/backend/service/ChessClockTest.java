@@ -254,6 +254,132 @@ class ChessClockTest extends PostgresIntegrationTest {
                 .doesNotThrowAnyException();
     }
 
+    // Final-review I2: GameFinisher stops the clock at the right value. Before the fix the final
+    // snapshot still showed the loser's whole remaining budget as of the start of its last turn.
+    @Test
+    void aTimeoutFinishShowsTheLosersClockAtZero() {
+        var game = playBothFirstMoves(startedGame("5+3"));
+        ((MutableClock) clock).advance(Duration.ofMillis(300_001)); // 1ms past White's main budget
+
+        var outcome = gameSessions.performAction(game.id(), whiteToken, null, "act-late",
+                new ActionRequest(ActionType.PLACE, null, BoardPosition.A4, game.version()));
+
+        assertThat(outcome.rejectedByTimeout()).isTrue();
+        assertThat(outcome.game().status()).isEqualTo("BLACK_WON");
+        assertThat(outcome.game().result().reason()).isEqualTo("TIMEOUT");
+        assertThat(outcome.game().clock().running()).isFalse();
+        assertThat(outcome.game().clock().whiteMs()).isZero();
+        assertThat(outcome.game().clock().blackMs()).isEqualTo(300_000L);
+        GameSessionEntity stored = gameRepository.findById(game.id()).orElseThrow();
+        assertThat(stored.getWhiteRemainingMs()).isZero();
+        assertThat(stored.getBlackRemainingMs()).isEqualTo(300_000L);
+    }
+
+    @Test
+    void aResignationMidTurnDeductsTheElapsedTurnTimeFromTheSideToMove() {
+        var game = playBothFirstMoves(startedGame("5+3"));
+        ((MutableClock) clock).advance(Duration.ofSeconds(10)); // White (to move) thinks for 10s
+
+        GameResponse resigned = gameSessions.resign(game.id(), whiteToken, "resign-1");
+
+        assertThat(resigned.status()).isEqualTo("BLACK_WON");
+        assertThat(resigned.clock().whiteMs()).isEqualTo(290_000L); // no increment on a finish
+        assertThat(resigned.clock().blackMs()).isEqualTo(300_000L);
+        assertThat(gameRepository.findById(game.id()).orElseThrow().getWhiteRemainingMs()).isEqualTo(290_000L);
+    }
+
+    @Test
+    void theNonMovingSideResigningStillChargesTheSideToMove() {
+        var game = playBothFirstMoves(startedGame("5+3"));
+        ((MutableClock) clock).advance(Duration.ofSeconds(7)); // White is to move; Black resigns
+
+        GameResponse resigned = gameSessions.resign(game.id(), blackToken, "resign-black");
+
+        assertThat(resigned.status()).isEqualTo("WHITE_WON");
+        assertThat(resigned.clock().whiteMs()).isEqualTo(293_000L);
+        assertThat(resigned.clock().blackMs()).isEqualTo(300_000L);
+    }
+
+    @Test
+    void aFirstMoveAbortLeavesTheMoversMainTimeUntouched() {
+        var game = startedGame("5+3");
+        ((MutableClock) clock).advance(Duration.ofSeconds(31));
+
+        var outcome = gameSessions.performAction(game.id(), whiteToken, null, "act-aborted",
+                new ActionRequest(ActionType.PLACE, null, BoardPosition.A1, game.version()));
+
+        assertThat(outcome.game().status()).isEqualTo("ABORTED");
+        assertThat(outcome.game().clock().whiteMs()).isEqualTo(300_000L);
+        assertThat(outcome.game().clock().blackMs()).isEqualTo(300_000L);
+    }
+
+    @Test
+    void anAgreedDrawClearsTheDrawOfferAndSettlesTheSideToMove() {
+        var game = playBothFirstMoves(startedGame("5+3"));
+        ((MutableClock) clock).advance(Duration.ofSeconds(4));
+
+        GameResponse offered = gameSessions.offerDraw(game.id(), whiteToken, "draw-offer", "OFFER");
+        assertThat(offered.drawOfferedBy()).isEqualTo("WHITE");
+        GameResponse accepted = gameSessions.offerDraw(game.id(), blackToken, "draw-accept", "ACCEPT");
+
+        assertThat(accepted.status()).isEqualTo("DRAWN");
+        assertThat(accepted.result().reason()).isEqualTo("DRAW_AGREED");
+        assertThat(accepted.drawOfferedBy()).isNull();
+        assertThat(gameRepository.findById(game.id()).orElseThrow().getDrawOfferedBy()).isNull();
+        assertThat(accepted.clock().whiteMs()).isEqualTo(296_000L);
+        assertThat(accepted.clock().blackMs()).isEqualTo(300_000L);
+    }
+
+    // Spec M2.3 / M2.9: "成三后移除对方棋子 - 计时不中断，也不加秒。只有回合交给对方时才加秒". Built
+    // with real moves only; the mill placement (White G1) is White's 3rd placement, not a first
+    // move for either side, so ordinary main-time accounting applies throughout.
+    @Test
+    void aMillPlacementAddsNoIncrementAndTheFollowingRemoveAddsItOnHandoff() {
+        GameResponse game = playBothFirstMoves(startedGame("5+3")); // White A1, Black D2 (both first moves)
+
+        ((MutableClock) clock).advance(Duration.ofSeconds(5));
+        game = gameSessions.performAction(game.id(), whiteToken, null, "mill-w2",
+                new ActionRequest(ActionType.PLACE, null, BoardPosition.D1, game.version())).game();
+        assertThat(game.clock().whiteMs()).isEqualTo(298_000L); // 300_000 - 5_000 + 3_000
+
+        ((MutableClock) clock).advance(Duration.ofSeconds(4));
+        game = gameSessions.performAction(game.id(), blackToken, null, "mill-b2",
+                new ActionRequest(ActionType.PLACE, null, BoardPosition.B2, game.version())).game();
+        assertThat(game.clock().blackMs()).isEqualTo(299_000L); // 300_000 - 4_000 + 3_000
+
+        // White G1 completes the A1-D1-G1 mill: the turn does not pass (a removal is pending).
+        ((MutableClock) clock).advance(Duration.ofSeconds(7));
+        Instant millAt = clock.instant();
+        GameResponse afterMill = gameSessions.performAction(game.id(), whiteToken, null, "mill-w3",
+                new ActionRequest(ActionType.PLACE, null, BoardPosition.G1, game.version())).game();
+        assertThat(afterMill.phase().name()).isEqualTo("REMOVE");
+        assertThat(afterMill.state().currentPlayer().name()).isEqualTo("WHITE");
+        assertThat(afterMill.clock().whiteMs()).isEqualTo(291_000L); // 298_000 - 7_000, NO increment
+        assertThat(afterMill.clock().blackMs()).isEqualTo(299_000L);
+        // The deadline is White's OWN remaining time from now, not Black's.
+        assertThat(afterMill.clock().turnDeadlineAt()).isEqualTo(millAt.plusMillis(291_000L));
+        GameSessionEntity midRemoval = gameRepository.findById(game.id()).orElseThrow();
+        assertThat(midRemoval.getTurnStartedAt()).isEqualTo(millAt);
+
+        // The REMOVE deducts only the time since the mill placement, then hands off (+increment).
+        ((MutableClock) clock).advance(Duration.ofSeconds(2));
+        Instant removeAt = clock.instant();
+        GameResponse afterRemove = gameSessions.performAction(game.id(), whiteToken, null, "mill-w4",
+                new ActionRequest(ActionType.REMOVE, null, BoardPosition.B2, afterMill.version())).game();
+        assertThat(afterRemove.state().currentPlayer().name()).isEqualTo("BLACK");
+        assertThat(afterRemove.clock().whiteMs()).isEqualTo(292_000L); // 291_000 - 2_000 + 3_000
+        assertThat(afterRemove.clock().blackMs()).isEqualTo(299_000L);
+        assertThat(afterRemove.clock().turnDeadlineAt()).isEqualTo(removeAt.plusMillis(299_000L));
+    }
+
+    private GameResponse playBothFirstMoves(GameResponse game) {
+        var afterWhite = gameSessions.performAction(game.id(), whiteToken, null, "first-w-" + UUID.randomUUID(),
+                new ActionRequest(ActionType.PLACE, null, BoardPosition.A1, game.version()));
+        var afterBlack = gameSessions.performAction(game.id(), blackToken, null, "first-b-" + UUID.randomUUID(),
+                new ActionRequest(ActionType.PLACE, null, BoardPosition.D2, afterWhite.game().version()));
+        return afterBlack.game();
+    }
+
     private String writeMinimalState() {
         try {
             return objectMapper.writeValueAsString(GameEngine.newGame().state());
