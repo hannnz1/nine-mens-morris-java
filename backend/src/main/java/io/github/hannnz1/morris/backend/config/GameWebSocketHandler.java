@@ -113,19 +113,15 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
                 connection.gameId = gameId;
                 connection.side = side;
                 connection.deadline.cancel(false);
-                send(connection, mapper.writeValueAsString(Map.of("type", "SUBSCRIBED", "gameId", gameId)));
 
-                Presence presence = presenceByGame.computeIfAbsent(gameId, id -> new Presence());
-                Set<String> ids = side == Player.WHITE ? presence.whiteConnectionIds : presence.blackConnectionIds;
-                ids.add(session.getId());
-                if (side == Player.WHITE) presence.whiteDisconnectedAt = null;
-                else presence.blackDisconnectedAt = null;
-                // Recompute {white, black} and broadcast only if it changed from the last-broadcast
-                // state (spec: PRESENCE is pushed on change, not on every subscribe).
-                recomputeAndBroadcastIfChanged(gameId, presence);
-                // A late joiner always learns the opponent's current state directly, even when the
-                // recompute above found no change to broadcast.
-                send(connection, buildPresencePayload(presence.lastWhiteOnline, presence.lastBlackOnline));
+                // Presence registration (id add, recompute/broadcast, direct snapshot) happens
+                // entirely under the game's presence lock, and BEFORE the SUBSCRIBED ack is sent.
+                // If this connection is already dead, the send inside registerPresence fails and
+                // unregisters it again on the same thread (the presence monitor is reentrant), so
+                // a dead connection never gets stuck registered as ONLINE forever.
+                registerPresence(gameId, side, connection);
+
+                send(connection, mapper.writeValueAsString(Map.of("type", "SUBSCRIBED", "gameId", gameId)));
             } catch (JsonProcessingException | IllegalArgumentException exception) {
                 reject(connection, "INVALID_MESSAGE", CloseStatus.POLICY_VIOLATION);
             } catch (RuntimeException exception) {
@@ -175,18 +171,68 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
     private void remove(Connection connection) {
         connections.remove(connection.session.getId(), connection);
         if (connection.deadline != null) connection.deadline.cancel(false);
-        if (connection.gameId != null && connection.side != null) {
-            Presence presence = presenceByGame.get(connection.gameId);
-            if (presence != null) {
-                Set<String> ids = connection.side == Player.WHITE
-                        ? presence.whiteConnectionIds : presence.blackConnectionIds;
-                ids.remove(connection.session.getId());
-                // Do NOT broadcast here: OFFLINE is only ever reported by sweepPresence(), after the
-                // full 5-second grace period has elapsed (spec M2.7's "掉线 5 秒后才推送离线").
-                if (ids.isEmpty()) {
-                    if (connection.side == Player.WHITE) presence.whiteDisconnectedAt = clock.instant();
-                    else presence.blackDisconnectedAt = clock.instant();
-                }
+        UUID gameId = connection.gameId;
+        Player side = connection.side;
+        if (gameId != null && side != null) {
+            unregisterPresence(gameId, side, connection.session.getId());
+        }
+    }
+
+    /**
+     * Registers a newly subscribed connection with the game's presence entry, using the standard
+     * computeIfAbsent-then-recheck retry loop so a concurrent sweepPresence() that just removed this
+     * game's Presence (because it saw both sides offline with no connections, Important I1) cannot
+     * leave this registration silently attached to an orphaned, already-removed Presence instance:
+     * if {@code removed} is set by the time we get the lock, we retry and computeIfAbsent installs a
+     * fresh Presence.
+     *
+     * Every presence mutation for this game - registering the id, clearing disconnectedAt, the
+     * recompute-and-latch-compare, and sending both the broadcast and this connection's direct
+     * snapshot - happens while holding the SAME {@code synchronized (presence)} lock (Important I2),
+     * so a concurrent recompute can never interleave with this one, and this game's PRESENCE messages
+     * stay in order. The direct snapshot send only happens after registration, and the SUBSCRIBED ack
+     * (sent by the caller, outside this lock) only happens after this method returns - both close the
+     * dead-connection leak in Critical C1.
+     */
+    private void registerPresence(UUID gameId, Player side, Connection connection) {
+        while (true) {
+            Presence presence = presenceByGame.computeIfAbsent(gameId, id -> new Presence());
+            synchronized (presence) {
+                if (presence.removed) continue;
+                Set<String> ids = side == Player.WHITE ? presence.whiteConnectionIds : presence.blackConnectionIds;
+                ids.add(connection.session.getId());
+                if (side == Player.WHITE) presence.whiteDisconnectedAt = null;
+                else presence.blackDisconnectedAt = null;
+                recomputeAndBroadcastLocked(gameId, presence, clock.instant());
+                // A late joiner always learns the opponent's current state directly, even when the
+                // recompute above found no change worth broadcasting to everyone else.
+                String snapshot = buildPresencePayloadOrNull(gameId, presence.lastWhiteOnline, presence.lastBlackOnline);
+                if (snapshot != null) send(connection, snapshot);
+                return;
+            }
+        }
+    }
+
+    /**
+     * Unregisters one connection id from its side's presence set. If that was the side's last
+     * connection, stamps a disconnect time but does NOT broadcast here - OFFLINE is only ever
+     * reported by sweepPresence(), after the full 5-second grace period has elapsed (spec M2.7's
+     * "掉线 5 秒后才推送离线"). Runs entirely under the game's presence lock (Important I2); when
+     * called from inside a PRESENCE broadcast send that just failed (Critical C1's dead-connection
+     * case, or the ping job), the calling thread already holds this same Presence's monitor, and
+     * since Java monitors are reentrant that nested acquisition is safe.
+     */
+    private void unregisterPresence(UUID gameId, Player side, String connectionId) {
+        Presence presence = presenceByGame.get(gameId);
+        if (presence == null) return;
+        synchronized (presence) {
+            if (presence.removed) return;
+            Set<String> ids = side == Player.WHITE ? presence.whiteConnectionIds : presence.blackConnectionIds;
+            ids.remove(connectionId);
+            if (ids.isEmpty()) {
+                Instant now = clock.instant();
+                if (side == Player.WHITE) presence.whiteDisconnectedAt = now;
+                else presence.blackDisconnectedAt = now;
             }
         }
     }
@@ -225,10 +271,18 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
         for (Map.Entry<UUID, Presence> entry : presenceByGame.entrySet()) {
             UUID gameId = entry.getKey();
             Presence presence = entry.getValue();
-            recomputeAndBroadcastIfChanged(gameId, presence, now);
-            if (!presence.lastWhiteOnline && !presence.lastBlackOnline
-                    && presence.whiteConnectionIds.isEmpty() && presence.blackConnectionIds.isEmpty()) {
-                presenceByGame.remove(gameId, presence);
+            synchronized (presence) {
+                if (presence.removed) continue;
+                recomputeAndBroadcastLocked(gameId, presence, now);
+                if (!presence.lastWhiteOnline && !presence.lastBlackOnline
+                        && presence.whiteConnectionIds.isEmpty() && presence.blackConnectionIds.isEmpty()) {
+                    // Important I1: flip removed and unpublish under the SAME lock a racing
+                    // registerPresence() checks, so that thread is guaranteed to see either the
+                    // live entry (and register into it) or removed=true (and retry with a fresh one)
+                    // - never a state where it silently registers into an orphaned Presence.
+                    presence.removed = true;
+                    presenceByGame.remove(gameId, presence);
+                }
             }
         }
     }
@@ -238,10 +292,18 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
     boolean isOnline(UUID gameId, Player side) {
         Presence presence = presenceByGame.get(gameId);
         if (presence == null) return false;
-        Instant now = clock.instant();
-        return side == Player.WHITE
-                ? computeOnline(presence.whiteConnectionIds, presence.whiteDisconnectedAt, now)
-                : computeOnline(presence.blackConnectionIds, presence.blackDisconnectedAt, now);
+        synchronized (presence) {
+            if (presence.removed) return false;
+            Instant now = clock.instant();
+            return side == Player.WHITE
+                    ? computeOnline(presence.whiteConnectionIds, presence.whiteDisconnectedAt, now)
+                    : computeOnline(presence.blackConnectionIds, presence.blackDisconnectedAt, now);
+        }
+    }
+
+    /** Test accessor: whether a game still has a live Presence entry tracked at all. */
+    boolean isTracked(UUID gameId) {
+        return presenceByGame.containsKey(gameId);
     }
 
     private boolean computeOnline(Set<String> connectionIds, Instant disconnectedAt, Instant now) {
@@ -250,39 +312,38 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
         return Duration.between(disconnectedAt, now).compareTo(PRESENCE_GRACE) < 0;
     }
 
-    private void recomputeAndBroadcastIfChanged(UUID gameId, Presence presence) {
-        recomputeAndBroadcastIfChanged(gameId, presence, clock.instant());
-    }
-
-    private void recomputeAndBroadcastIfChanged(UUID gameId, Presence presence, Instant now) {
+    /** Recomputes {white, black} and, only if it differs from the last-broadcast latch, updates the
+     * latch and broadcasts under the SAME lock (Important I2: no stale recompute can ever overwrite a
+     * newer latch, and no two broadcasts for this game can ever be sent out of order). Caller MUST
+     * already hold {@code synchronized (presence)}. */
+    private void recomputeAndBroadcastLocked(UUID gameId, Presence presence, Instant now) {
         boolean whiteOnline = computeOnline(presence.whiteConnectionIds, presence.whiteDisconnectedAt, now);
         boolean blackOnline = computeOnline(presence.blackConnectionIds, presence.blackDisconnectedAt, now);
-        boolean changed;
-        synchronized (presence) {
-            changed = presence.lastWhiteOnline != whiteOnline || presence.lastBlackOnline != blackOnline;
+        if (presence.lastWhiteOnline != whiteOnline || presence.lastBlackOnline != blackOnline) {
             presence.lastWhiteOnline = whiteOnline;
             presence.lastBlackOnline = blackOnline;
+            String payload = buildPresencePayloadOrNull(gameId, whiteOnline, blackOnline);
+            if (payload != null) {
+                for (Connection connection : connections.values()) {
+                    if (gameId.equals(connection.gameId)) send(connection, payload);
+                }
+            }
         }
-        if (changed) broadcastPresence(gameId, whiteOnline, blackOnline);
     }
 
-    private void broadcastPresence(UUID gameId, boolean whiteOnline, boolean blackOnline) {
-        final String payload;
+    /** A JSON encoding failure must never throw out of sweepPresence() (it would abort the sweep for
+     * every other game) or out of registerPresence(); log and return null instead, matching how the
+     * ping job (sendPings()) handles a per-connection failure without ever throwing out of the loop. */
+    private String buildPresencePayloadOrNull(UUID gameId, boolean whiteOnline, boolean blackOnline) {
         try {
-            payload = buildPresencePayload(whiteOnline, blackOnline);
+            return mapper.writeValueAsString(Map.of(
+                    "type", "PRESENCE",
+                    "white", whiteOnline ? "ONLINE" : "OFFLINE",
+                    "black", blackOnline ? "ONLINE" : "OFFLINE"));
         } catch (JsonProcessingException exception) {
-            throw new IllegalStateException("Could not serialize presence notification", exception);
+            LOGGER.warn("Could not serialize presence notification for game {}", gameId, exception);
+            return null;
         }
-        for (Connection connection : connections.values()) {
-            if (gameId.equals(connection.gameId)) send(connection, payload);
-        }
-    }
-
-    private String buildPresencePayload(boolean whiteOnline, boolean blackOnline) throws JsonProcessingException {
-        return mapper.writeValueAsString(Map.of(
-                "type", "PRESENCE",
-                "white", whiteOnline ? "ONLINE" : "OFFLINE",
-                "black", blackOnline ? "ONLINE" : "OFFLINE"));
     }
 
     private void close(Connection connection, CloseStatus status) {
@@ -341,5 +402,9 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
         volatile Instant blackDisconnectedAt;
         volatile boolean lastWhiteOnline;
         volatile boolean lastBlackOnline;
+        /** Set, under this instance's own lock, once sweepPresence() has unpublished this entry
+         * from presenceByGame. A registerPresence() that observes this retries with a fresh
+         * Presence rather than silently registering into an orphaned one (Important I1). */
+        volatile boolean removed;
     }
 }
