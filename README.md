@@ -29,7 +29,7 @@
 | 返回入口 | 保留本标签页身份，显示恢复入口 |
 | 刷新与断线 | 尝试恢复身份；重连后读取最新快照，定期快照同步补偿遗漏推送 |
 | 未确认操作 | 保留原请求并提供重试入口，确认前阻止新操作 |
-| 连接状态 | 区分实时连接和快照同步，不将其当作对手在线状态 |
+| 连接状态 | 显示本标签页自身的实时连接/快照同步状态；对手在线/离线另行显示，由服务端 `PRESENCE` 消息驱动 |
 
 玩家凭证保存在当前标签页的 `sessionStorage` 中。关闭标签页、清除浏览器存储，或选择 **永久清除保存的玩家身份**，可能导致无法恢复席位；姓名和邀请链接不能代替身份凭证。
 
@@ -209,7 +209,7 @@ java -jar .\backend\target\backend-1.0.0-SNAPSHOT.jar
 | `POST` | `/api/v1/games/{id}/actions` | 使用 `Authorization: Bearer` 或 `X-Player-Token`、幂等键和版本提交操作 |
 | `POST` | `/api/v1/games/{id}/resign` | 认输；需 `Authorization: Bearer` 及 `Idempotency-Key`，仅限持久身份对局 |
 | `POST` | `/api/v1/games/{id}/cancel` | 创建者取消尚无对手的等待局；需 `Authorization: Bearer` 及 `Idempotency-Key`，仅限持久身份对局 |
-| `POST` | `/api/v1/games/{id}/draw` | 提议 / 接受 / 拒绝和棋，请求体 `{"action":"OFFER"\|"ACCEPT"\|"DECLINE"}`；需 `Authorization: Bearer` 及 `Idempotency-Key`，仅限持久身份对局 |
+| `POST` | `/api/v1/games/{id}/draw` | 提议 / 接受 / 拒绝和棋，请求体 `{"action":"OFFER"|"ACCEPT"|"DECLINE"}`；需 `Authorization: Bearer` 及 `Idempotency-Key`，仅限持久身份对局 |
 | `POST` | `/api/v1/games/{id}/rematch` | 提议 / 接受 / 拒绝重赛，请求体同上；需 `Authorization: Bearer` 及 `Idempotency-Key`，仅限持久身份对局 |
 | WebSocket | `/ws` | 鉴权后接收状态与在线状态，不执行落子操作 |
 
