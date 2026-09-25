@@ -209,7 +209,7 @@ java -jar .\backend\target\backend-1.0.0-SNAPSHOT.jar
 | `POST` | `/api/v1/games/{id}/actions` | 使用 `Authorization: Bearer` 或 `X-Player-Token`、幂等键和版本提交操作 |
 | `POST` | `/api/v1/games/{id}/resign` | 认输；需 `Authorization: Bearer` 及 `Idempotency-Key`，仅限持久身份对局 |
 | `POST` | `/api/v1/games/{id}/cancel` | 创建者取消尚无对手的等待局；需 `Authorization: Bearer` 及 `Idempotency-Key`，仅限持久身份对局 |
-| `POST` | `/api/v1/games/{id}/draw` | 提议 / 接受 / 拒绝和棋，请求体 `{"action":"OFFER"|"ACCEPT"|"DECLINE"}`；需 `Authorization: Bearer` 及 `Idempotency-Key`，仅限持久身份对局 |
+| `POST` | `/api/v1/games/{id}/draw` | 提议 / 接受 / 拒绝和棋，请求体 `{"action":"OFFER"\|"ACCEPT"\|"DECLINE"}`；需 `Authorization: Bearer` 及 `Idempotency-Key`，仅限持久身份对局 |
 | `POST` | `/api/v1/games/{id}/rematch` | 提议 / 接受 / 拒绝重赛，请求体同上；需 `Authorization: Bearer` 及 `Idempotency-Key`，仅限持久身份对局 |
 | WebSocket | `/ws` | 鉴权后接收状态与在线状态，不执行落子操作 |
 
