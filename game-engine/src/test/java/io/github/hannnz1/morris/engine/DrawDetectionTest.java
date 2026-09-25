@@ -139,6 +139,34 @@ class DrawDetectionTest {
         assertThat(state.positionCounts().values()).containsExactly(1);
     }
 
+    @Test
+    void aCaptureDropsEveryPositionCountedBeforeIt() {
+        // Final-review M-c: a capture permanently lowers the piece count, so no earlier position
+        // can recur - the counts recorded before it are dead weight in state_json. Same fixture as
+        // captureRecordsThePostCapturePositionForRepetitionCounting, but seeded with stale counts.
+        EnumMap<BoardPosition, Piece> board = new EnumMap<>(BoardPosition.class);
+        for (BoardPosition position : BoardPosition.values()) board.put(position, Piece.EMPTY);
+        board.put(BoardPosition.A1, Piece.WHITE);
+        board.put(BoardPosition.D1, Piece.WHITE);
+        board.put(BoardPosition.G1, Piece.WHITE);
+        board.put(BoardPosition.G7, Piece.WHITE);
+        board.put(BoardPosition.B2, Piece.BLACK);
+        board.put(BoardPosition.F2, Piece.BLACK);
+        board.put(BoardPosition.F6, Piece.BLACK);
+        board.put(BoardPosition.B6, Piece.BLACK);
+        Map<String, Integer> stale = Map.of("stale-position-1|WHITE|0,0", 2, "stale-position-2|BLACK|0,0", 1);
+        GameState removalPendingState = new GameState(board, Player.WHITE, 0, 0, true, null, 0, stale, 7, null);
+
+        GameState state = GameEngine.restore(removalPendingState).apply(GameAction.remove(BoardPosition.B2));
+
+        assertThat(state.winner()).isNull();
+        assertThat(state.drawReason()).isNull();
+        assertThat(state.positionCounts()).hasSize(1);
+        assertThat(state.positionCounts()).doesNotContainKeys(stale.keySet().toArray(String[]::new));
+        assertThat(state.positionCounts().values()).containsExactly(1);
+        assertThat(state.pliesSinceRemoval()).isZero();
+    }
+
     private static GameEngine minimalMovingPhasePosition() {
         EnumMap<BoardPosition, Piece> board = new EnumMap<>(BoardPosition.class);
         for (BoardPosition position : BoardPosition.values()) {

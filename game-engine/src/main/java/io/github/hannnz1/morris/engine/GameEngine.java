@@ -147,6 +147,10 @@ public final class GameEngine {
         board.put(target, Piece.EMPTY);
         removalPending = false;
         pliesSinceRemoval = 0; // a capture always resets the no-capture counter, win or not
+        // A capture permanently lowers the number of pieces on the board (nothing is ever placed
+        // again once counting starts), so no position recorded before it can ever recur. Drop them
+        // so positionCounts - persisted in state_json on every move - stays bounded.
+        positionCounts.clear();
         Player opponent = currentPlayer.opponent();
         if (allPiecesPlaced() && (piecesOnBoard(opponent) < 3 || legalMovesFor(opponent).isEmpty())) {
             winner = currentPlayer;
