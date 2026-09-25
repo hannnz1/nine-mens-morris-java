@@ -169,6 +169,11 @@ class GameWebSocketHandlerTest {
 
     private void subscribe(WebSocketSession session, UUID id, String token) throws Exception {
         handler.handleTextMessage(session, new TextMessage(subscription(id, token)));
+        // Presence broadcasts/snapshots triggered by SUBSCRIBE are now enqueued to a dedicated
+        // executor rather than sent inline (round 3 fix for a lock-order-inversion deadlock), so
+        // tests that assert exact sendMessage() call counts must wait for that queue to drain
+        // first - otherwise a presence send can land after clearInvocations() and inflate a count.
+        handler.awaitPresenceSends();
     }
 
     private GameResponse response(long version) {

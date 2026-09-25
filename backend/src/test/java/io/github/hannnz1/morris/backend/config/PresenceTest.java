@@ -27,6 +27,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 
@@ -61,6 +62,11 @@ class PresenceTest {
         handler.afterConnectionEstablished(session);
         handler.handleTextMessage(session, new TextMessage(
                 "{\"type\":\"SUBSCRIBE\",\"gameId\":\"" + gameId + "\",\"token\":\"" + "x".repeat(43) + "\"}"));
+        // Presence sends (the recompute-driven broadcast and the direct snapshot to this new
+        // connection) are now enqueued to a dedicated executor rather than sent inline (round 3
+        // fix for the lock-order-inversion deadlock), so a test must wait for that queue to drain
+        // before asserting on what a mocked session's sendMessage() received.
+        handler.awaitPresenceSends();
     }
 
     private List<String> payloadsSentTo(WebSocketSession session) throws Exception {
@@ -126,6 +132,7 @@ class PresenceTest {
 
         clock.advance(Duration.ofSeconds(2)); // total 6s since white's disconnect
         handler.sweepPresence();
+        handler.awaitPresenceSends();
 
         List<String> latePayloads = payloadsSentTo(lateJoiner);
         long offlineBroadcasts = latePayloads.stream()
@@ -136,6 +143,7 @@ class PresenceTest {
         // A second sweep past the same already-reported transition must not re-broadcast: the
         // latch already matches the derived state, so recomputeAndBroadcastLocked finds no change.
         handler.sweepPresence();
+        handler.awaitPresenceSends();
         List<String> afterSecondSweep = payloadsSentTo(lateJoiner);
         long offlineBroadcastsAfterSecondSweep = afterSecondSweep.stream()
                 .filter(payload -> payload.contains("\"type\":\"PRESENCE\"") && payload.contains("\"white\":\"OFFLINE\""))
@@ -159,7 +167,7 @@ class PresenceTest {
 
         // Reconnect within the 5s grace window.
         WebSocketSession whiteAgain = openSession("s2");
-        subscribeAs(handler, whiteAgain, Player.WHITE);
+        subscribeAs(handler, whiteAgain, Player.WHITE); // already awaits the presence-sender queue
 
         // The only message the reconnecting/observing connections should have seen for this game
         // is the SUBSCRIBED ack (plus the direct presence snapshot to the new connection which,
@@ -224,6 +232,7 @@ class PresenceTest {
 
         clock.advance(Duration.ofMillis(1)); // now exactly 5.000s since disconnect
         handler.sweepPresence();
+        handler.awaitPresenceSends();
         assertThat(handler.isOnline(gameId, Player.WHITE)).isFalse();
 
         List<String> probe1Payloads = payloadsSentTo(probe1);
@@ -297,12 +306,106 @@ class PresenceTest {
         handler.afterConnectionEstablished(dead);
         handler.handleTextMessage(dead, new TextMessage(
                 "{\"type\":\"SUBSCRIBE\",\"gameId\":\"" + gameId + "\",\"token\":\"" + "x".repeat(43) + "\"}"));
+        // The presence-sender thread performs the failing send (and the resulting unregister)
+        // asynchronously; wait for it before relying on the id having been removed.
+        handler.awaitPresenceSends();
 
         clock.advance(Duration.ofSeconds(6));
         handler.sweepPresence();
 
         assertThat(handler.isOnline(gameId, Player.WHITE)).isFalse();
         assertThat(handler.isTracked(gameId)).isFalse();
+    }
+
+    @Test
+    void c1DiscriminatingRegression_transientSendFailureDuringSubscribeDoesNotStayOnlineForever() throws Exception {
+        // The test above (isOpen() always false) actually PASSES even against the pre-fix 55e91c9
+        // handler, because in that buggy version the very first send attempt (the SUBSCRIBED ack)
+        // fails before the presence id is ever added, so there is nothing to leak in that specific
+        // case. This test discriminates: isOpen() stays true, but the FIRST sendMessage() call
+        // fails and later calls succeed - reproducing a transient failure at exactly the moment a
+        // send is attempted while (in the old, buggy ordering) the id may or may not have been
+        // registered yet. Confirmed by the reviewer to fail against 55e91c9 and pass against the
+        // fix here.
+        GameWebSocketHandler handler = newHandler();
+        WebSocketSession session = mock(WebSocketSession.class);
+        when(session.getId()).thenReturn("flaky1");
+        when(session.isOpen()).thenReturn(true);
+        doThrow(new java.io.IOException("boom")).doNothing().when(session).sendMessage(any());
+        when(seatResolver.resolve(any(), any(), any())).thenReturn(Player.WHITE);
+
+        handler.afterConnectionEstablished(session);
+        handler.handleTextMessage(session, new TextMessage(
+                "{\"type\":\"SUBSCRIBE\",\"gameId\":\"" + gameId + "\",\"token\":\"" + "x".repeat(43) + "\"}"));
+        handler.awaitPresenceSends();
+
+        clock.advance(Duration.ofSeconds(6));
+        handler.sweepPresence();
+
+        assertThat(handler.isOnline(gameId, Player.WHITE)).isFalse();
+        assertThat(handler.isTracked(gameId)).isFalse();
+    }
+
+    @Test
+    void concurrentSubscribeWithSynchronousCloseCallbackDuringSendDoesNotDeadlock() throws Exception {
+        // Important (round 3): the servlet container (confirmed for Tomcat via
+        // WsRemoteEndpointImplBase -> WsSession.doClose -> fireEndpointOnClose) can invoke Spring's
+        // afterConnectionClosed callback SYNCHRONOUSLY on the very thread that was sending, when
+        // that send fails. If sends were still performed while holding a game's presence lock (the
+        // pre-round-3 design), and another thread was concurrently mid-SUBSCRIBE holding that
+        // connection's monitor while waiting on the presence lock, the two threads would deadlock.
+        // This reproduces that shape - one connection's sendMessage() synchronously triggers
+        // afterConnectionClosed on the calling thread and then throws, concurrently with another
+        // thread performing an ordinary SUBSCRIBE on this same game - and asserts it completes
+        // well within a generous timeout, i.e. does not deadlock.
+        assertTimeoutPreemptively(Duration.ofSeconds(10), () -> {
+            GameWebSocketHandler handler = newHandler();
+            String victimToken = "V".repeat(43);
+            String otherToken = "O".repeat(43);
+            when(seatResolver.resolve(any(), any(), any())).thenAnswer(invocation -> {
+                String token = invocation.getArgument(1);
+                return token.startsWith("V") ? Player.BLACK : Player.WHITE;
+            });
+
+            WebSocketSession victim = mock(WebSocketSession.class);
+            when(victim.getId()).thenReturn("victim");
+            when(victim.isOpen()).thenReturn(true);
+            doAnswer(invocation -> {
+                handler.afterConnectionClosed(victim, CloseStatus.SERVER_ERROR);
+                throw new java.io.IOException("simulated container close-on-send-failure");
+            }).when(victim).sendMessage(any());
+
+            WebSocketSession other = openSession("other");
+
+            CountDownLatch startGate = new CountDownLatch(1);
+            Thread subscribeVictim = new Thread(() -> {
+                await(startGate);
+                handler.afterConnectionEstablished(victim);
+                handler.handleTextMessage(victim, new TextMessage(
+                        "{\"type\":\"SUBSCRIBE\",\"gameId\":\"" + gameId + "\",\"token\":\"" + victimToken + "\"}"));
+            }, "victim-subscriber");
+            Thread subscribeOther = new Thread(() -> {
+                await(startGate);
+                handler.afterConnectionEstablished(other);
+                handler.handleTextMessage(other, new TextMessage(
+                        "{\"type\":\"SUBSCRIBE\",\"gameId\":\"" + gameId + "\",\"token\":\"" + otherToken + "\"}"));
+            }, "other-subscriber");
+            subscribeVictim.setDaemon(true);
+            subscribeOther.setDaemon(true);
+
+            subscribeVictim.start();
+            subscribeOther.start();
+            startGate.countDown();
+            subscribeVictim.join(9000);
+            subscribeOther.join(9000);
+
+            // A timed join (not a plain join()) so a real deadlock fails fast instead of hanging
+            // the whole build; assertTimeoutPreemptively above is the belt-and-braces backstop.
+            assertThat(subscribeVictim.isAlive()).isFalse();
+            assertThat(subscribeOther.isAlive()).isFalse();
+
+            handler.awaitPresenceSends();
+        });
     }
 
     @Test
@@ -357,9 +460,11 @@ class PresenceTest {
         handler.afterConnectionEstablished(blackFinal);
         handler.handleTextMessage(blackFinal, new TextMessage(
                 "{\"type\":\"SUBSCRIBE\",\"gameId\":\"" + gameId + "\",\"token\":\"" + blackToken + "\"}"));
+        handler.awaitPresenceSends();
 
         clock.advance(Duration.ofSeconds(6));
         handler.sweepPresence();
+        handler.awaitPresenceSends();
 
         assertThat(handler.isOnline(gameId, Player.WHITE)).isTrue();
         assertThat(handler.isOnline(gameId, Player.BLACK)).isTrue();
@@ -368,6 +473,22 @@ class PresenceTest {
         String lastBlackPresence = lastPresencePayload(blackFinal);
         assertThat(lastWhitePresence).contains("\"white\":\"ONLINE\"").contains("\"black\":\"ONLINE\"");
         assertThat(lastBlackPresence).contains("\"white\":\"ONLINE\"").contains("\"black\":\"ONLINE\"");
+
+        // Strengthen the ending so it actually discriminates a broken sweep/latch: close BLACK's
+        // last remaining connection, advance past the 5s grace, sweep, and confirm the transition
+        // to OFFLINE is both reflected in isOnline() and actually delivered to the still-open WHITE
+        // session's latest PRESENCE payload - not just that both sides happen to still look online.
+        clearInvocations(whiteFinal);
+        handler.afterConnectionClosed(blackFinal, CloseStatus.NORMAL);
+        clock.advance(Duration.ofSeconds(6));
+        handler.sweepPresence();
+        handler.awaitPresenceSends();
+
+        assertThat(handler.isOnline(gameId, Player.WHITE)).isTrue();
+        assertThat(handler.isOnline(gameId, Player.BLACK)).isFalse();
+
+        String finalWhitePresence = lastPresencePayload(whiteFinal);
+        assertThat(finalWhitePresence).contains("\"white\":\"ONLINE\"").contains("\"black\":\"OFFLINE\"");
     }
 
     private void churn(GameWebSocketHandler handler, String token, AtomicInteger idCounter, int iterations,

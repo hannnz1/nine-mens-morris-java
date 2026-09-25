@@ -24,6 +24,10 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -41,6 +45,32 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
     private final Map<UUID, Presence> presenceByGame = new ConcurrentHashMap<>();
     private final ScheduledThreadPoolExecutor deadlines = new ScheduledThreadPoolExecutor(1, runnable -> {
         Thread thread = new Thread(runnable, "game-websocket-auth-timeout");
+        thread.setDaemon(true);
+        return thread;
+    });
+    /**
+     * A dedicated, single-thread, FIFO executor for every send made while a game's presence lock
+     * is held (the recompute-driven broadcast and the direct snapshot to a new subscriber).
+     *
+     * A blocking container send can, on some send failures, cause the servlet container to invoke
+     * Spring's {@code afterConnectionClosed} SYNCHRONOUSLY on the sending thread (confirmed for
+     * Tomcat: {@code WsRemoteEndpointImplBase} -> {@code WsSession.doClose} ->
+     * {@code fireEndpointOnClose}), which then takes {@code synchronized (connection)}. If that send
+     * happened while THIS thread already held a game's presence lock, and some other thread was
+     * meanwhile holding that same connection's monitor while itself waiting on the presence lock
+     * (e.g. mid-SUBSCRIBE), the two threads deadlock - lock-order inversion between the presence
+     * lock and the connection monitor.
+     *
+     * The fix: the presence lock is only ever used to derive state, compare-and-swap the
+     * last-broadcast latch, and build the payload/SUBMIT the send here - never to actually perform
+     * the container send. Because submission happens while still holding the presence lock,
+     * FIFO submission order preserves the per-game delivery order the latch depends on (I2). The
+     * executor thread itself never holds a presence lock while sending, so if a send fails and the
+     * container synchronously calls {@code afterConnectionClosed} on this executor thread, that
+     * thread simply takes connection-then-presence in the normal order - no inversion possible.
+     */
+    private final ExecutorService presenceSender = Executors.newSingleThreadExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "presence-sender");
         thread.setDaemon(true);
         return thread;
     });
@@ -108,17 +138,15 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
                     reject(connection, exception.code(), CloseStatus.POLICY_VIOLATION);
                     return;
                 }
-                // Register BEFORE acknowledging. A snapshot read after this acknowledgement
-                // covers earlier commits; later commits can also reach this connection.
-                connection.gameId = gameId;
-                connection.side = side;
                 connection.deadline.cancel(false);
 
-                // Presence registration (id add, recompute/broadcast, direct snapshot) happens
-                // entirely under the game's presence lock, and BEFORE the SUBSCRIBED ack is sent.
-                // If this connection is already dead, the send inside registerPresence fails and
-                // unregisters it again on the same thread (the presence monitor is reentrant), so
-                // a dead connection never gets stuck registered as ONLINE forever.
+                // Presence registration - assigning connection.gameId/side, adding the id,
+                // recompute/broadcast, and enqueuing the direct snapshot - happens entirely under
+                // the game's presence lock, and BEFORE the SUBSCRIBED ack is sent. This closes the
+                // gap where the ping thread could see a subscribed gameId before registration. If
+                // this connection is already dead, the enqueued send fails on the presence-sender
+                // thread and unregisters it there (that thread holds no lock at the time, so no
+                // lock-order inversion), so a dead connection never gets stuck registered ONLINE.
                 registerPresence(gameId, side, connection);
 
                 send(connection, mapper.writeValueAsString(Map.of("type", "SUBSCRIBED", "gameId", gameId)));
@@ -186,19 +214,26 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
      * if {@code removed} is set by the time we get the lock, we retry and computeIfAbsent installs a
      * fresh Presence.
      *
-     * Every presence mutation for this game - registering the id, clearing disconnectedAt, the
-     * recompute-and-latch-compare, and sending both the broadcast and this connection's direct
-     * snapshot - happens while holding the SAME {@code synchronized (presence)} lock (Important I2),
-     * so a concurrent recompute can never interleave with this one, and this game's PRESENCE messages
-     * stay in order. The direct snapshot send only happens after registration, and the SUBSCRIBED ack
-     * (sent by the caller, outside this lock) only happens after this method returns - both close the
-     * dead-connection leak in Critical C1.
+     * Every presence mutation for this game - assigning connection.gameId/side, registering the id,
+     * clearing disconnectedAt, the recompute-and-latch-compare, and ENQUEUING both the broadcast and
+     * this connection's direct snapshot to {@link #presenceSender} - happens while holding the SAME
+     * {@code synchronized (presence)} lock (Important I2), so a concurrent recompute can never
+     * interleave with this one, and (since enqueue order under the lock matches delivery order on
+     * the single-thread executor) this game's PRESENCE messages stay in order. Nothing here ever
+     * calls a container send directly, so this method itself can never deadlock against a Tomcat
+     * synchronous close callback. The direct snapshot enqueue only happens after registration, and
+     * the SUBSCRIBED ack (sent by the caller, outside this lock) only happens after this method
+     * returns - both still close the dead-connection leak in Critical C1.
      */
     private void registerPresence(UUID gameId, Player side, Connection connection) {
         while (true) {
             Presence presence = presenceByGame.computeIfAbsent(gameId, id -> new Presence());
             synchronized (presence) {
                 if (presence.removed) continue;
+                // Assign the connection's game/side identity here, under the presence lock, so the
+                // ping job can never observe a subscribed gameId before presence registration.
+                connection.gameId = gameId;
+                connection.side = side;
                 Set<String> ids = side == Player.WHITE ? presence.whiteConnectionIds : presence.blackConnectionIds;
                 ids.add(connection.session.getId());
                 if (side == Player.WHITE) presence.whiteDisconnectedAt = null;
@@ -207,7 +242,7 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
                 // A late joiner always learns the opponent's current state directly, even when the
                 // recompute above found no change worth broadcasting to everyone else.
                 String snapshot = buildPresencePayloadOrNull(gameId, presence.lastWhiteOnline, presence.lastBlackOnline);
-                if (snapshot != null) send(connection, snapshot);
+                if (snapshot != null) enqueueSend(connection, snapshot);
                 return;
             }
         }
@@ -217,10 +252,12 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
      * Unregisters one connection id from its side's presence set. If that was the side's last
      * connection, stamps a disconnect time but does NOT broadcast here - OFFLINE is only ever
      * reported by sweepPresence(), after the full 5-second grace period has elapsed (spec M2.7's
-     * "掉线 5 秒后才推送离线"). Runs entirely under the game's presence lock (Important I2); when
-     * called from inside a PRESENCE broadcast send that just failed (Critical C1's dead-connection
-     * case, or the ping job), the calling thread already holds this same Presence's monitor, and
-     * since Java monitors are reentrant that nested acquisition is safe.
+     * "掉线 5 秒后才推送离线"). Called via remove() from, among others, {@link #send} on the
+     * {@link #presenceSender} thread when an enqueued presence send fails (Critical C1's
+     * dead-connection case) or from the container's own callback thread when a send elsewhere
+     * fails/closes. Neither of those callers holds a presence lock at that point (sends are never
+     * performed while one is held - see {@link #presenceSender}'s javadoc), so this is always a
+     * plain, uncontended acquisition of this Presence's monitor, never a nested/reentrant one.
      */
     private void unregisterPresence(UUID gameId, Player side, String connectionId) {
         Presence presence = presenceByGame.get(gameId);
@@ -313,9 +350,11 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
     }
 
     /** Recomputes {white, black} and, only if it differs from the last-broadcast latch, updates the
-     * latch and broadcasts under the SAME lock (Important I2: no stale recompute can ever overwrite a
-     * newer latch, and no two broadcasts for this game can ever be sent out of order). Caller MUST
-     * already hold {@code synchronized (presence)}. */
+     * latch and ENQUEUES the broadcast (never sends directly - see {@link #presenceSender}) under
+     * the SAME lock (Important I2: no stale recompute can ever overwrite a newer latch, and - since
+     * the enqueue order under this lock matches FIFO delivery order on the single-thread executor -
+     * no two broadcasts for this game can ever be delivered out of order). Caller MUST already hold
+     * {@code synchronized (presence)}. */
     private void recomputeAndBroadcastLocked(UUID gameId, Presence presence, Instant now) {
         boolean whiteOnline = computeOnline(presence.whiteConnectionIds, presence.whiteDisconnectedAt, now);
         boolean blackOnline = computeOnline(presence.blackConnectionIds, presence.blackDisconnectedAt, now);
@@ -325,9 +364,37 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
             String payload = buildPresencePayloadOrNull(gameId, whiteOnline, blackOnline);
             if (payload != null) {
                 for (Connection connection : connections.values()) {
-                    if (gameId.equals(connection.gameId)) send(connection, payload);
+                    if (gameId.equals(connection.gameId)) enqueueSend(connection, payload);
                 }
             }
+        }
+    }
+
+    /** Hands a container send off to {@link #presenceSender} instead of performing it on the
+     * caller's thread (which, for every caller of this method, holds a game's presence lock -
+     * see that field's javadoc for why a direct send there can deadlock). */
+    private void enqueueSend(Connection connection, String payload) {
+        try {
+            presenceSender.execute(() -> send(connection, payload));
+        } catch (RejectedExecutionException exception) {
+            LOGGER.debug("Presence sender is shut down; dropping send to {}", connection.session.getId());
+        }
+    }
+
+    /** Test hook: blocks until every presence send enqueued so far has been processed by
+     * {@link #presenceSender} (which is FIFO), so a test can safely assert on what a mocked
+     * session's {@code sendMessage} received right after triggering a presence change. */
+    void awaitPresenceSends() {
+        CountDownLatch latch = new CountDownLatch(1);
+        try {
+            presenceSender.execute(latch::countDown);
+        } catch (RejectedExecutionException exception) {
+            return;
+        }
+        try {
+            latch.await(5, TimeUnit.SECONDS);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -377,6 +444,7 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
     @PreDestroy
     public void shutdown() {
         deadlines.shutdownNow();
+        presenceSender.shutdownNow();
         connections.values().forEach(connection -> close(connection, CloseStatus.GOING_AWAY));
     }
 
