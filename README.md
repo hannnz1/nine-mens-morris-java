@@ -54,6 +54,31 @@
 
 合法落子、移动、飞行、成磨、移除限制和胜负判断统一由规则引擎负责，浏览器只展示后端给出的合法操作。
 
+### 计时规则
+
+- 以持久身份（`Authorization: Bearer`）创建对局时可选 `timeControl`：`3+2`、`5+3`（默认）、`10+5`（基础时间分钟 + 每步加时秒），无“不限时”选项；旧的匿名创建流程没有计时。
+- 时钟在黑方加入时启动，而非白方创建对局时。
+- 双方各自的第一步棋有 30 秒宽限，不消耗主时间；若在宽限内未走出第一步，对局以 `ABORTED` 结束，不产生胜者。
+- 加时仅在回合交给对方时结算；成磨后移除对方棋子期间不加时。
+- 己方时间耗尽后才到达的落子请求会被拒绝（HTTP 409 `GAME_NOT_ACTIVE`），对局按超时判负记录；后台定时扫描任务也会独立收尾已超时但未收到请求的对局。
+- 服务器每次重启时，会将启动前的停机时长（超过 10 秒才补偿）顺延加到所有进行中对局的回合截止时间上，避免纯粹因为服务重启导致误判超时。
+
+### 和棋规则
+
+- 三次重复局面、或连续 50 个半回合无吃子（移除对方棋子），均只在“移动阶段”（双方棋子已全部放置后）计入判和，落子阶段不计。
+- 双方也可协议和棋：每位玩家最多可发起 3 次和棋提议，对方任意一步棋（包括提议方自己走棋）都会清除待处理的提议。
+
+### 认输 / 取消 / 和棋 / 重赛
+
+以下端点均需 `Authorization: Bearer` 与 `Idempotency-Key`，且仅适用于以持久身份创建的对局（见[接口契约](#接口契约)）：
+
+- 认输（`/resign`）：当前对局判对方胜。
+- 取消（`/cancel`）：仅创建者（白方）可调用，且仅在对局仍为 `WAITING_FOR_PLAYER`（尚无对手加入）时有效。
+- 和棋（`/draw`）、重赛（`/rematch`）：请求体为 `{"action":"OFFER"|"ACCEPT"|"DECLINE"}`。
+- 重赛需在对局结束后 5 分钟内发起；新对局双方执子颜色互换，沿用原对局的时间制式，双方立即入座并开始计时。
+
+对局状态新增 `DRAWN`（和棋）、`ABORTED`（无胜负中止，如首步超时）、`CANCELLED`（创建者取消），与原有的 `WAITING_FOR_PLAYER`、`IN_PROGRESS`、`WHITE_WON`、`BLACK_WON` 并存。对局结束后 `result.reason` 取值：`NO_PIECES`、`NO_MOVES`、`TIMEOUT`、`RESIGN`、`DRAW_REPETITION`、`DRAW_NO_CAPTURE`、`DRAW_AGREED`、`ABORTED`。
+
 ## 技术栈
 
 | 层次 | 技术 |
@@ -62,7 +87,8 @@
 | 后端 | Spring Boot 3.4.13、Spring MVC、Bean Validation |
 | 持久化 | Spring Data JPA / Hibernate、PostgreSQL 16 |
 | 并发控制 | 按棋局的悲观行锁、短事务、`@Version`、`expectedVersion` |
-| 实时通信 | 原生 WebSocket、小型 JSON 协议、REST 恢复快照 |
+| 实时通信 | 原生 WebSocket、小型 JSON 协议、REST 恢复快照、25 秒心跳 Ping |
+| 定时任务 | Spring `@Scheduled`：超时扫描（每秒）、在线状态扫描（每秒）、启动时停机补偿、心跳写入（每 5 秒） |
 | 前端 | HTML、CSS、原生 JavaScript、Fetch、Web Crypto、sessionStorage |
 | 数据库结构 | Flyway 版本化迁移、Hibernate `validate` |
 | 测试 | JUnit、Spring Boot 集成测试、H2、Testcontainers（集成测试用真实 PostgreSQL 容器）、Node.js 前端状态测试 |
@@ -181,11 +207,17 @@ java -jar .\backend\target\backend-1.0.0-SNAPSHOT.jar
 | `GET` | `/api/v1/games/{id}` | 读取公开棋局状态，不含凭证 |
 | `GET` | `/api/v1/games/{id}/session` | 使用 `Authorization: Bearer` 或 `X-Player-Token` 校验身份并读取快照 |
 | `POST` | `/api/v1/games/{id}/actions` | 使用 `Authorization: Bearer` 或 `X-Player-Token`、幂等键和版本提交操作 |
-| WebSocket | `/ws` | 鉴权后接收状态，不执行落子操作 |
+| `POST` | `/api/v1/games/{id}/resign` | 认输；需 `Authorization: Bearer` 及 `Idempotency-Key`，仅限持久身份对局 |
+| `POST` | `/api/v1/games/{id}/cancel` | 创建者取消尚无对手的等待局；需 `Authorization: Bearer` 及 `Idempotency-Key`，仅限持久身份对局 |
+| `POST` | `/api/v1/games/{id}/draw` | 提议 / 接受 / 拒绝和棋，请求体 `{"action":"OFFER"\|"ACCEPT"\|"DECLINE"}`；需 `Authorization: Bearer` 及 `Idempotency-Key`，仅限持久身份对局 |
+| `POST` | `/api/v1/games/{id}/rematch` | 提议 / 接受 / 拒绝重赛，请求体同上；需 `Authorization: Bearer` 及 `Idempotency-Key`，仅限持久身份对局 |
+| WebSocket | `/ws` | 鉴权后接收状态与在线状态，不执行落子操作 |
 
 `POST /api/v1/games` 与 `POST /api/v1/games/{id}/join` 现在优先通过 `Authorization: Bearer <clientToken>` 鉴权持久身份，这是新客户端的主要方式；未携带 `Authorization` 头时回退到创建前已存在的匿名流程（`X-Player-Token` / `joinToken`），仅供在此变更之前创建的对局继续使用。
 
-匿名创建请求为 `{"whitePlayer":"Alice"}`。匿名加入请求包含 `blackPlayer` 和 `joinToken`；`joinToken` 应为密码学随机的 32 字节、URL-safe Base64 无填充字符串（43 字符），发送前持久保存。`clientToken` 采用相同格式，由客户端生成并保存，服务端只存储其哈希；持久身份下的创建与加入还需携带 `Idempotency-Key` 请求头。
+匿名创建请求为 `{"whitePlayer":"Alice"}`。匿名加入请求包含 `blackPlayer` 和 `joinToken`；`joinToken` 应为密码学随机的 32 字节、URL-safe Base64 无填充字符串（43 字符），发送前持久保存。`clientToken` 采用相同格式，由客户端生成并保存，服务端只存储其哈希；持久身份下的创建与加入还需携带 `Idempotency-Key` 请求头。持久身份创建请求体可选携带 `{"timeControl":"5+3"}`（`3+2` / `5+3` / `10+5`，省略则为 `5+3`）。
+
+对局状态（`GameResponse`）在 M1 字段基础上新增：`clock{whiteMs, blackMs, running, serverNow, turnDeadlineAt}`（`whiteMs`/`blackMs` 为当前回合开始时刻的剩余时间，不随时间实时递减）、`drawOfferedBy`、`result{winner, reason}`、`rematchOfferedBy`、`rematchGameId`。
 
 操作请求示例：
 
@@ -206,7 +238,7 @@ WebSocket 建立后发送：
 {"type":"SUBSCRIBE","gameId":"棋局 UUID","token":"玩家凭证"}
 ```
 
-等待 `SUBSCRIBED` 后读取 REST 快照，后续接收 `GAME_STATE`。非法客户端消息会被拒绝。完整协议、错误码和恢复语义见[恢复设计与 API 契约](docs/recovery-design.zh-CN.md)。
+等待 `SUBSCRIBED` 后读取 REST 快照，后续接收 `GAME_STATE`，以及在线状态变化时的 `{"type":"PRESENCE","white":"ONLINE|OFFLINE","black":"ONLINE|OFFLINE"}`。一方所有连接断开满 5 秒后才会被上报为 `OFFLINE`；断线本身不判负，断线一方的时钟继续正常走动。服务端每 25 秒发送一次 WebSocket Ping 以探测半开连接。非法客户端消息会被拒绝。完整协议、错误码和恢复语义见[恢复设计与 API 契约](docs/recovery-design.zh-CN.md)。
 
 ## 测试与验证
 
@@ -247,11 +279,13 @@ node scripts/verify-realtime.cjs
 
 ## 当前取舍与限制
 
-- 面向单实例部署，WebSocket 连接保存在进程内，暂不支持跨实例消息分发。
+- 面向单实例部署，WebSocket 连接和在线状态（presence）都保存在进程内内存中，暂不支持跨实例消息分发或状态共享；多实例部署下在线状态会不准确。
 - 推送不是持久化消息；快照恢复当前状态，不保证每条中间通知都能送达，也不宣称端到端“恰好一次”。
-- 持久身份凭证（`clientToken`）现在保存在 `localStorage` 中，跨标签页和关闭重开仍可恢复；但浏览器站点数据被清除、或服务端已不再识别该凭证（如 `GET /api/v1/players/me` 返回 401）时，前端会静默清除本地记录并自动创建一个全新身份（`ensureIdentity` 的 401 处理逻辑），而不是提示用户输入恢复码——当前实现并没有恢复码功能。这意味着旧身份名下的所有对局会与新身份失去关联（不会出现在新身份的“我的对局”列表中），且无法找回。没有跨设备身份恢复、对手在线状态、匹配系统或排行榜。
-- 创建前已存在对局所依赖的 `X-Player-Token` 匿名路径计划在本次上线 30 天后移除，前提是届时不再有依赖该路径的进行中对局。
-- 创建白方成功但响应丢失时，可能留下无人继续的等待局；安全重试目前重点覆盖加入和游戏操作。
+- 持久身份凭证（`clientToken`）现在保存在 `localStorage` 中，跨标签页和关闭重开仍可恢复；但浏览器站点数据被清除、或服务端已不再识别该凭证（如 `GET /api/v1/players/me` 返回 401）时，前端会静默清除本地记录并自动创建一个全新身份（`ensureIdentity` 的 401 处理逻辑），而不是提示用户输入恢复码——当前实现并没有恢复码功能。这意味着旧身份名下的所有对局会与新身份失去关联（不会出现在新身份的“我的对局”列表中），且无法找回。没有跨设备身份恢复、匹配系统或排行榜。
+- 创建前已存在对局所依赖的 `X-Player-Token` 匿名路径计划在本次上线 30 天后移除，前提是届时不再有依赖该路径的进行中对局；该路径下创建的对局没有计时功能。
+- 创建白方成功但响应丢失时，可能留下无人继续的等待局；这类等待局在对手加入前没有时钟，也不会自动超时——安全重试目前重点覆盖加入和游戏操作，创建者可用 `/cancel` 主动取消。
+- 对局进行中一方断线不判负，也没有强制离场机制：断线方的时钟正常继续走动，直至其自然耗尽（超时判负）或对方认输/提议和棋等操作改变对局状态。
+- 重赛仅在对局结束后 5 分钟内可发起，超过窗口后旧对局无法再发起重赛，只能重新创建新对局。
 - 幂等记录没有自动过期清理，适用于演示规模；清理历史记录会缩短可重放范围。
 - 数据库结构变更通过 Flyway 版本化迁移管理；如果未来需要长期维护多个数据库版本，再评估更复杂的迁移策略。
 
