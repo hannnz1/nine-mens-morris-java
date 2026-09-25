@@ -185,6 +185,9 @@ public class GameSessionService {
     @Transactional(isolation = Isolation.READ_COMMITTED)
     public JoinGameResponse joinByBearer(UUID id, PlayerEntity black, String idempotencyKey) {
         String fingerprint = tokens.hash(black.getId() + ":join:" + id + ":" + idempotencyKey);
+        // Pattern A: lock first, so a concurrent retry under the same key serializes behind the
+        // first request and then replays its committed record.
+        GameSessionEntity entity = findGameForUpdate(id);
         var previous = playerIdempotencyRecords.findByIdPlayerIdAndIdIdempotencyKey(black.getId(), idempotencyKey);
         if (previous.isPresent()) {
             if (!previous.get().getRequestFingerprint().equals(fingerprint)) {
@@ -193,13 +196,20 @@ public class GameSessionService {
             return readJson(previous.get().getResponseJson(), JoinGameResponse.class);
         }
 
-        GameSessionEntity entity = findGameForUpdate(id);
         if (black.getId().equals(entity.getWhitePlayerId())) {
             throw new ApiException(HttpStatus.CONFLICT, "CANNOT_JOIN_OWN_GAME", "Use a different browser or device to join as the other player");
         }
         if (black.getId().equals(entity.getBlackPlayerId())) {
+            // The seated black player re-entering (e.g. via the room code again): a pure read that
+            // writes nothing, so it is allowed in any status.
             JoinGameResponse response = new JoinGameResponse(toResponse(entity, readState(entity)), null);
             return response;
+        }
+        // Only a game still waiting for its second player can be joined. Without this, a CANCELLED
+        // game (which has no black player) passed the seat check below and was brought back to
+        // life as IN_PROGRESS with a running clock (final-review C2).
+        if (!"WAITING_FOR_PLAYER".equals(entity.getStatus())) {
+            throw new ApiException(HttpStatus.CONFLICT, "GAME_NOT_ACTIVE", "This game can no longer be joined");
         }
         if (entity.getBlackPlayerId() != null || entity.getBlackPlayer() != null) {
             throw new ApiException(HttpStatus.CONFLICT, "GAME_ALREADY_FULL", "The game already has two players");
@@ -311,7 +321,9 @@ public class GameSessionService {
             return outcome;
         }
 
-        if (entity.getBlackPlayer() == null) {
+        // Decided by status, not by "black seat empty": a CANCELLED game also has no black player,
+        // and must report GAME_NOT_ACTIVE rather than WAITING_FOR_PLAYER (final-review M-h).
+        if ("WAITING_FOR_PLAYER".equals(entity.getStatus())) {
             throw new ApiException(HttpStatus.CONFLICT, "WAITING_FOR_PLAYER",
                     "A second player must join before the game can start");
         }
@@ -369,8 +381,12 @@ public class GameSessionService {
         if (nextState.winner() != null || nextState.drawReason() != null) {
             entity.updateState(statusOf(nextState), writeJson(nextState), clock.instant());
             entity = games.saveAndFlush(entity);
+            // currentState (not the just-stored nextState) tells the finisher whose clock was
+            // running: after a winning or drawing move, nextState's side to move may already be the
+            // opponent, but the elapsed turn time belongs to the mover.
             GameResponse finishedResponse = finisher.finish(entity, nextState.winner(),
-                    nextState.winner() != null ? engineWinReason(nextState) : nextState.drawReason());
+                    nextState.winner() != null ? engineWinReason(nextState) : nextState.drawReason(),
+                    currentState);
             ActionOutcome outcome = new ActionOutcome(finishedResponse, false);
             idempotencyRecords.saveAndFlush(new IdempotencyRecordEntity(
                     UUID.randomUUID(), id, idempotencyKey, fingerprint, writeJson(outcome), clock.instant()));
@@ -718,7 +734,8 @@ public class GameSessionService {
                 List.copyOf(engine.legalPlacements()), legalMoves, List.copyOf(engine.removablePieces()),
                 entity.getCreatedAt(), entity.getUpdatedAt(), clockView(entity),
                 entity.getDrawOfferedBy(), resultView(entity),
-                entity.getRematchOfferedBy(), entity.getRematchGameId());
+                entity.getRematchOfferedBy(), entity.getRematchGameId(),
+                entity.getWhitePlayerId(), entity.getBlackPlayerId());
     }
 
     private ResultView resultView(GameSessionEntity entity) {

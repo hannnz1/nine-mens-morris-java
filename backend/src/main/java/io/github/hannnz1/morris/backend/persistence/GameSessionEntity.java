@@ -288,12 +288,26 @@ public class GameSessionEntity {
         return finishedAt;
     }
 
+    // A finished game can have no live draw offer: the offer is moot, and leaving it set would keep
+    // advertising "draw offered" on a terminal snapshot (final-review M-a).
     public void finish(String status, String resultWinner, String resultReason, Instant finishedAt) {
         this.status = status;
         this.resultWinner = resultWinner;
         this.resultReason = resultReason;
+        this.drawOfferedBy = null;
         this.finishedAt = finishedAt;
         this.updatedAt = finishedAt;
+    }
+
+    // Records one side's final remaining time when the game ends mid-turn (GameFinisher only).
+    // Deliberately leaves turnStartedAt/turnDeadlineAt alone and adds no increment - the turn
+    // never handed off; the game simply stopped.
+    public void settleRemainingOnFinish(String side, long remainingMs) {
+        if ("WHITE".equals(side)) {
+            this.whiteRemainingMs = remainingMs;
+        } else {
+            this.blackRemainingMs = remainingMs;
+        }
     }
 
     public void startClock(int baseMs, int incrementMs, Instant now) {

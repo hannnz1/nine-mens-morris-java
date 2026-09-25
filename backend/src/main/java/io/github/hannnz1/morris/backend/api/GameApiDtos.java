@@ -82,7 +82,12 @@ public final class GameApiDtos {
             String drawOfferedBy,
             ResultView result,
             String rematchOfferedBy,
-            UUID rematchGameId
+            UUID rematchGameId,
+            // Player identity ids (null for a legacy anonymous seat / an empty seat). Clients work
+            // out their own side by comparing these with their own playerId - never by nickname,
+            // since two identities may share a nickname. Ids grant nothing: auth is by token hash.
+            UUID whitePlayerId,
+            UUID blackPlayerId
     ) {
     }
 

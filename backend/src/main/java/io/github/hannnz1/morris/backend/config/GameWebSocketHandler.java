@@ -232,8 +232,10 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
                 if (presence.removed) continue;
                 // Assign the connection's game/side identity here, under the presence lock, so the
                 // ping job can never observe a subscribed gameId before presence registration.
-                connection.gameId = gameId;
+                // side is written before gameId: every reader keys on gameId != null, so it must
+                // never see a gameId without its side.
                 connection.side = side;
+                connection.gameId = gameId;
                 Set<String> ids = side == Player.WHITE ? presence.whiteConnectionIds : presence.blackConnectionIds;
                 ids.add(connection.session.getId());
                 if (side == Player.WHITE) presence.whiteDisconnectedAt = null;
@@ -249,8 +251,9 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
     }
 
     /**
-     * Unregisters one connection id from its side's presence set. If that was the side's last
-     * connection, stamps a disconnect time but does NOT broadcast here - OFFLINE is only ever
+     * Unregisters one connection id from its side's presence set. If this call removed the side's
+     * last connection (a repeat call for an id that is already gone is a no-op), stamps a
+     * disconnect time but does NOT broadcast here - OFFLINE is only ever
      * reported by sweepPresence(), after the full 5-second grace period has elapsed (spec M2.7's
      * "掉线 5 秒后才推送离线"). Called via remove() from, among others, {@link #send} on the
      * {@link #presenceSender} thread when an enqueued presence send fails (Critical C1's
@@ -265,8 +268,11 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
         synchronized (presence) {
             if (presence.removed) return;
             Set<String> ids = side == Player.WHITE ? presence.whiteConnectionIds : presence.blackConnectionIds;
-            ids.remove(connectionId);
-            if (ids.isEmpty()) {
+            // Stamp only when THIS call actually removed the side's last connection. A stale or
+            // duplicate unregister (e.g. a queued presence send to an already-closed connection
+            // failing later on the presence-sender thread) finds the id already gone; re-stamping
+            // then would restart the 5s grace and flash the side ONLINE after OFFLINE was sent.
+            if (ids.remove(connectionId) && ids.isEmpty()) {
                 Instant now = clock.instant();
                 if (side == Player.WHITE) presence.whiteDisconnectedAt = now;
                 else presence.blackDisconnectedAt = now;
