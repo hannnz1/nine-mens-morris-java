@@ -4,6 +4,8 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hannnz1.morris.backend.api.ApiException;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.ActionRequest;
+import io.github.hannnz1.morris.backend.api.GameApiDtos.BotGameRequest;
+import io.github.hannnz1.morris.backend.api.GameApiDtos.PlayerColor;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.CreateGameRequest;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.CreateGameResponse;
 import io.github.hannnz1.morris.backend.api.GameApiDtos.ClockView;
@@ -65,6 +67,8 @@ public class GameSessionService {
     private final Clock clock;
     private final GameFinisher finisher;
     private final PlayerRepository playerRepository;
+    private final BotCapacityGuard botCapacity;
+    private final java.security.SecureRandom botColors = new java.security.SecureRandom();
 
     public GameSessionService(GameSessionRepository games,
                               IdempotencyRecordRepository idempotencyRecords,
@@ -77,7 +81,7 @@ public class GameSessionService {
                               RateLimiter rateLimiter,
                               Clock clock,
                               GameFinisher finisher,
-                              PlayerRepository playerRepository) {
+                              PlayerRepository playerRepository, BotCapacityGuard botCapacity) {
         this.games = games;
         this.idempotencyRecords = idempotencyRecords;
         this.tokens = tokens;
@@ -90,6 +94,7 @@ public class GameSessionService {
         this.clock = clock;
         this.finisher = finisher;
         this.playerRepository = playerRepository;
+        this.botCapacity = botCapacity;
     }
 
     @Transactional
@@ -181,6 +186,48 @@ public class GameSessionService {
         playerIdempotencyRecords.saveAndFlush(new PlayerIdempotencyRecordEntity(
                 white.getId(), idempotencyKey, fingerprint, writeJson(response), now));
         return response;
+    }
+
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public CreateGameResponse createBotGame(PlayerEntity human, String idempotencyKey, BotGameRequest request) {
+        validateIdempotencyKey(idempotencyKey);
+        if (!"HUMAN".equals(human.getKind()) || request.difficulty() == null)
+            throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "Human and difficulty required");
+        var time = TimeControl.parse(request.timeControl());
+        var color = request.color() == null ? PlayerColor.RANDOM : request.color();
+        String fingerprint = tokens.hash(human.getId() + ":create:BOT:" + request.difficulty() + ":" + color + ":" + time);
+        botCapacity.lock(); // held through replay, capacity check and transaction commit
+        var previous = playerIdempotencyRecords.findByIdPlayerIdAndIdIdempotencyKey(human.getId(), idempotencyKey);
+        if (previous.isPresent()) {
+            if (!previous.get().getRequestFingerprint().equals(fingerprint))
+                throw new ApiException(HttpStatus.CONFLICT, "IDEMPOTENCY_KEY_REUSED", "Key used for a different request");
+            return readJson(previous.get().getResponseJson(), CreateGameResponse.class);
+        }
+        if (!rateLimiter.tryAcquire("game-create:" + human.getId(), 20, Duration.ofMinutes(1)))
+            throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "RATE_LIMITED", "Too many games created recently");
+        requireHumanCapacity(human);
+        botCapacity.requireAvailable();
+        var bot = playerByIdOrThrow(BotRoster.id(request.difficulty()));
+        boolean humanWhite = color == PlayerColor.WHITE || (color == PlayerColor.RANDOM && botColors.nextBoolean());
+        var white = humanWhite ? human : bot;
+        var black = humanWhite ? bot : human;
+        var state = GameEngine.newGame().state();
+        var now = clock.instant();
+        var entity = new GameSessionEntity(UUID.randomUUID(), white.getNickname(), black.getNickname(), null, null,
+                "IN_PROGRESS", writeJson(state), now);
+        entity.assignPlayers(white.getId(), black.getId());
+        entity.setTimeControl(time.baseMs(), time.incrementMs());
+        entity.startClock(time.baseMs(), time.incrementMs(), now);
+        entity = games.saveAndFlush(entity);
+        var response = new CreateGameResponse(toResponse(entity, state), null, null);
+        playerIdempotencyRecords.saveAndFlush(new PlayerIdempotencyRecordEntity(human.getId(), idempotencyKey, fingerprint, writeJson(response), now));
+        publishAfterCommit(entity.getId(), response.game());
+        return response;
+    }
+
+    private void requireHumanCapacity(PlayerEntity player) {
+        if (!BotRoster.isBot(player.getId()) && games.countActiveGamesForPlayer(player.getId(), ACTIVE_STATUSES) >= 5)
+            throw new ApiException(HttpStatus.CONFLICT, "TOO_MANY_ACTIVE_GAMES", "A player already has 5 active or waiting games");
     }
 
     @Transactional(isolation = Isolation.READ_COMMITTED)
@@ -542,6 +589,8 @@ public class GameSessionService {
 
         GameResponse response = switch (action) {
             case "OFFER" -> {
+                if (BotRoster.side(entity.getWhitePlayerId(), entity.getBlackPlayerId()) != null)
+                    throw new ApiException(HttpStatus.CONFLICT, "DRAW_NOT_AVAILABLE", "Draw offers are unavailable against a computer");
                 if (entity.hasPendingDrawOfferFrom(opponentSide)) {
                     // Both sides offered around the same time; the second request serializes behind
                     // the row lock and sees the first offer already pending - treat it as an accept.
@@ -631,6 +680,8 @@ public class GameSessionService {
 
         GameResponse response = switch (action) {
             case "OFFER" -> {
+                if (BotRoster.side(entity.getWhitePlayerId(), entity.getBlackPlayerId()) != null)
+                    yield createRematchGame(entity);
                 if (entity.hasPendingRematchOfferFrom(opponentSide)) {
                     // Both sides asked for a rematch around the same time; the second request
                     // serializes behind the row lock and sees the first offer already pending -
@@ -690,12 +741,10 @@ public class GameSessionService {
         PlayerEntity newWhite = playerByIdOrThrow(original.getBlackPlayerId());
         PlayerEntity newBlack = playerByIdOrThrow(original.getWhitePlayerId());
 
-        long whiteActiveGames = games.countActiveGamesForPlayer(newWhite.getId(), ACTIVE_STATUSES);
-        long blackActiveGames = games.countActiveGamesForPlayer(newBlack.getId(), ACTIVE_STATUSES);
-        if (whiteActiveGames >= 5 || blackActiveGames >= 5) {
-            throw new ApiException(HttpStatus.CONFLICT, "TOO_MANY_ACTIVE_GAMES",
-                    "A player already has 5 active or waiting games");
-        }
+        boolean botGame = BotRoster.side(newWhite.getId(), newBlack.getId()) != null;
+        if (botGame) botCapacity.requireAvailable();
+        requireHumanCapacity(newWhite);
+        requireHumanCapacity(newBlack);
 
         TimeControl timeControl = original.getBaseMs() != null && original.getIncrementMs() != null
                 ? new TimeControl(original.getBaseMs(), original.getIncrementMs())
@@ -706,7 +755,7 @@ public class GameSessionService {
         GameSessionEntity newGame = new GameSessionEntity(UUID.randomUUID(), newWhite.getNickname(),
                 newBlack.getNickname(), null, null, "IN_PROGRESS", writeJson(state), now);
         newGame.assignPlayers(newWhite.getId(), newBlack.getId());
-        newGame.assignRoomCode(generateUniqueRoomCode());
+        if (!botGame) newGame.assignRoomCode(generateUniqueRoomCode());
         newGame.setTimeControl(timeControl.baseMs(), timeControl.incrementMs());
         newGame.startClock(timeControl.baseMs(), timeControl.incrementMs(), now); // White's 30s first-move grace starts immediately
         newGame = games.saveAndFlush(newGame);

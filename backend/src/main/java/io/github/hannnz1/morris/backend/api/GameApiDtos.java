@@ -43,6 +43,9 @@ public final class GameApiDtos {
 
     public record CreateGameRequestForPlayer(String timeControl) {
     }
+    public enum PlayerColor { WHITE, BLACK, RANDOM }
+    public record BotGameRequest(io.github.hannnz1.morris.engine.ai.Difficulty difficulty,
+                                 PlayerColor color, String timeControl) {}
 
     public record CreateGameResponse(
             GameResponse game,

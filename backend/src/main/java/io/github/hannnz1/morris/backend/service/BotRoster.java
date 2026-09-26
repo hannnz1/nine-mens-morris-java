@@ -11,6 +11,7 @@ public final class BotRoster {
             UUID.fromString("00000000-0000-4000-8000-00000000b003"));
     public static UUID id(Difficulty difficulty) { return IDS.get(difficulty.ordinal()); }
     public static Difficulty difficulty(UUID id) {
+        if (id == null) return null;
         int index = IDS.indexOf(id);
         return index < 0 ? null : Difficulty.values()[index];
     }

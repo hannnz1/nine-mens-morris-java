@@ -13,6 +13,8 @@ import java.util.Optional;
 import java.util.UUID;
 
 public interface GameSessionRepository extends JpaRepository<GameSessionEntity, UUID> {
+    @Query("select count(g) from GameSessionEntity g where g.status = 'IN_PROGRESS' and (g.whitePlayerId in :ids or g.blackPlayerId in :ids)")
+    long countBotGames(@Param("ids") List<UUID> ids);
     // All writes to an existing game acquire this lock before checking its state.
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select game from GameSessionEntity game where game.id = :id")
