@@ -37,6 +37,60 @@ function harness() {
     const timer=async ms=>{const entry=[...timers].find(([,v])=>v.ms===ms);assert.ok(entry, 'expected timer '+ms);timers.delete(entry[0]);await entry[1].fn();};
     return {ctx,run,save,activate,timer,storage,nodes};
 }
+function botSetup() {
+    const h=harness();
+    h.run('client.identity={playerId:"me",nickname:"Human",clientToken:"x".repeat(43)};');
+    h.ctx.botGame={...game(A),whitePlayerId:'bot',blackPlayerId:'me',botSide:'WHITE',botDifficulty:'MEDIUM'};
+    h.ctx.fetch=async(url)=>url.includes('/players/')?response({games:[]}):response({game:h.ctx.botGame,roomCode:null});
+    return h;
+}
+test('bot create defaults and selected color come from server seat ids; entry busy is released',async()=>{
+    const h=botSetup();let sent;
+    h.ctx.fetch=async(url,r)=>{if(url.includes('/players/'))return response({games:[]});sent=r;return response({game:h.ctx.botGame,roomCode:null});};
+    await h.run('createBotGame()');
+    assert.deepEqual(JSON.parse(sent.body),{opponent:'BOT',difficulty:'MEDIUM',color:'RANDOM',timeControl:'5+3'});
+    assert.equal(h.run('client.session.side'),'BLACK');assert.equal(h.run('client.entryBusy'),false);
+    assert.equal(h.run('client.pendingCreate'),null);
+});
+test('lost bot create response persists identical key and body and blocks other entry until retry',async()=>{
+    const h=botSetup();const requests=[];
+    h.ctx.fetch=async(url,r)=>{requests.push(r);throw new TypeError('offline');};
+    await h.run('createBotGame()');
+    assert.equal(h.run('client.entryBusy'),false);
+    assert.ok(JSON.parse([...h.storage.values()][0]).pendingCreate);
+    assert.equal(h.run('mayStartEntry()'),false);
+    h.ctx.fetch=async(url,r)=>{if(url.includes('/players/'))return response({games:[]});requests.push(r);return response({game:h.ctx.botGame});};
+    await h.run('restoreSession()');
+    assert.equal(requests[0].headers['Idempotency-Key'],requests[1].headers['Idempotency-Key']);
+    assert.equal(requests[0].body,requests[1].body);
+    assert.equal(h.run('client.pendingCreate'),null);
+});
+test('bot game shows thinking and online status but hides draw and invitations',()=>{
+    const h=botSetup();h.activate();
+    h.run('client.game=botGame;client.session.side="BLACK";client.session.bearer=true;renderGame();');
+    assert.match(h.nodes.get('actionPrompt').textContent,/电脑思考中/);
+    assert.equal(h.nodes.get('drawOfferButton').hidden,true);
+    assert.equal(h.nodes.get('copyGameId').hidden,true);
+    assert.equal(h.nodes.get('roomCodeBlock').hidden,true);
+    assert.match(h.nodes.get('opponentPresence').textContent,/在线/);
+    h.run('client.game.status="WHITE_WON";renderGame();');
+    assert.doesNotMatch(h.nodes.get('actionPrompt').textContent,/思考中/);
+    h.run('client.game.status="IN_PROGRESS";client.game.botSide=null;renderGame();');
+    assert.equal(h.nodes.get('drawOfferButton').hidden,false);
+    assert.equal(h.nodes.get('copyGameId').hidden,false);
+});
+test('bot busy rejection clears pending request and allows another attempt',async()=>{
+    const h=botSetup();h.ctx.fetch=async()=>({ok:false,status:409,text:async()=>JSON.stringify({code:'BOT_BUSY'})});
+    await h.run('createBotGame()');
+    assert.match(h.nodes.get('toast').textContent,/电脑对手繁忙/);
+    assert.equal(h.run('client.pendingCreate'),null);assert.equal(h.run('client.entryBusy'),false);
+});
+test('late bot creation cannot replace a newer session',async()=>{
+    const h=botSetup();let resolve;h.ctx.fetch=url=>url.includes('/players/')?Promise.resolve(response({games:[]})):new Promise(r=>resolve=r);
+    const pending=h.run('createBotGame()');h.run('leaveGame()');h.activate(B);
+    resolve(response({game:h.ctx.botGame}));await pending;
+    assert.equal(h.run('client.session.gameId'),B);
+});
 function confirm(h) {
     h.run('client.socket.emit("open"); client.socket.emit("message",{data:JSON.stringify({type:"SUBSCRIBED",gameId:client.session.gameId})});');
 }
