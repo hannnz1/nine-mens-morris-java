@@ -205,14 +205,16 @@ public class GameSessionService {
             JoinGameResponse response = new JoinGameResponse(toResponse(entity, readState(entity)), null);
             return response;
         }
+        // Seat check first: a third player on a game with both seats taken is told it is full,
+        // whatever its status - the more specific and actionable answer.
+        if (entity.getBlackPlayerId() != null || entity.getBlackPlayer() != null) {
+            throw new ApiException(HttpStatus.CONFLICT, "GAME_ALREADY_FULL", "The game already has two players");
+        }
         // Only a game still waiting for its second player can be joined. Without this, a CANCELLED
-        // game (which has no black player) passed the seat check below and was brought back to
+        // game (which has no black player) passed the seat check above and was brought back to
         // life as IN_PROGRESS with a running clock (final-review C2).
         if (!"WAITING_FOR_PLAYER".equals(entity.getStatus())) {
             throw new ApiException(HttpStatus.CONFLICT, "GAME_NOT_ACTIVE", "This game can no longer be joined");
-        }
-        if (entity.getBlackPlayerId() != null || entity.getBlackPlayer() != null) {
-            throw new ApiException(HttpStatus.CONFLICT, "GAME_ALREADY_FULL", "The game already has two players");
         }
         entity.assignPlayers(entity.getWhitePlayerId(), black.getId());
         entity.joinBlackPlayer(black.getNickname(), "", clock.instant());

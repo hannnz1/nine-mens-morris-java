@@ -139,6 +139,26 @@ class ResignAndCancelIntegrationTest extends PostgresIntegrationTest {
         assertThat(clock.get("turnDeadlineAt")).isNull();
     }
 
+    // A third player trying to join a game that already has both seats taken must be told the game
+    // is full, not that it is inactive: the game is still running, just not for them.
+    @Test
+    void aThirdPlayerJoiningAFullInProgressGameGetsGameAlreadyFull() {
+        var white = createPlayer("Han");
+        var black = createPlayer("Zhu");
+        var game = createAndJoinGame(white, black);
+
+        var third = createPlayer("Lee");
+        HttpHeaders joinHeaders = new HttpHeaders();
+        joinHeaders.setBearerAuth(third.token());
+        joinHeaders.set("Idempotency-Key", UUID.randomUUID().toString());
+        joinHeaders.setContentType(MediaType.APPLICATION_JSON);
+        var join = rest.exchange(url("/api/v1/games/" + game.id() + "/join"), HttpMethod.POST,
+                new HttpEntity<>(Map.of(), joinHeaders), Map.class);
+
+        assertThat(join.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(join.getBody().get("code")).isEqualTo("GAME_ALREADY_FULL");
+    }
+
     // Final-review M-h: a move on a CANCELLED game used to hit the "black seat empty" check first
     // and report WAITING_FOR_PLAYER. It must be GAME_NOT_ACTIVE; a genuinely waiting game still
     // reports WAITING_FOR_PLAYER.
