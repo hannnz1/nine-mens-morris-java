@@ -66,6 +66,16 @@ class ChessClockTest extends PostgresIntegrationTest {
                 .hasFieldOrPropertyWithValue("code", "VALIDATION_FAILED");
     }
 
+    // The invite card shows the time control before anyone joins, when the clock itself is still
+    // all zeros - so the response carries the label separately.
+    @Test
+    void aWaitingGameAlreadyReportsItsTimeControlLabel() {
+        PlayerEntity white = createPlayer("Han");
+        var created = gameSessions.createForPlayer(white, "tc-label", "3+2");
+        assertThat(created.game().timeControl()).isEqualTo("3+2");
+        assertThat(gameSessions.get(created.game().id()).timeControl()).isEqualTo("3+2");
+    }
+
     @Test
     void clockStartsWhenBlackJoinsNotWhenWhiteCreates() {
         PlayerEntity white = createPlayer("Han");
