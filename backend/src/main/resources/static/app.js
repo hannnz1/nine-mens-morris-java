@@ -230,7 +230,7 @@ async function restoreSession() {
             : error.code === "INVALID_PLAYER_TOKEN" ? "玩家凭证已失效，可清除本标签页保存的对局后重新加入。"
             : "暂时无法恢复，保存的对局已保留，请点击恢复重试。";
         showToast(text);
-    } finally { if (matches(ctx)) entryBusy(false); }
+    } finally { if (ctx.epoch === client.epoch) entryBusy(false); }
 }
 
 function mayStartEntry() {
@@ -508,6 +508,7 @@ function applyGame(game, source) {
     if (!client.active || game?.id !== client.session?.gameId) return;
     const previousVersion = client.game?.version;
     const previousRematchGameId = client.game?.rematchGameId;
+    const previousRematchOfferedBy = client.game?.rematchOfferedBy;
     if (previousVersion != null && game.version < previousVersion) return;
     if (previousVersion != null && game.version > previousVersion) {
         const changes = POSITIONS.filter(p => (client.game.state.board[p] || "EMPTY") !== (game.state.board[p] || "EMPTY"));
@@ -536,6 +537,11 @@ function applyGame(game, source) {
     if (game.rematchGameId && !previousRematchGameId) {
         void enterMyGame(game.rematchGameId);
         return;
+    }
+    // A pending rematch offer disappeared without a new game: it was declined. Say so on both
+    // sides, otherwise the only visible change is a button swap and the click looks ignored.
+    if (previousRematchOfferedBy && !game.rematchOfferedBy && !game.rematchGameId) {
+        showToast(previousRematchOfferedBy === client.session.side ? "对方拒绝了再来一局" : "已拒绝再来一局");
     }
     renderGame();
 }
@@ -1133,7 +1139,9 @@ async function enterMyGame(gameId) {
     } catch (error) {
         if (matches(ctx)) showToast(readableError(error));
     } finally {
-        if (matches(ctx)) entryBusy(false);
+        // Epoch only, like createGame/resumeJoin: a successful entry changes the session's gameId,
+        // so matches(ctx) would be false here and leave entryBusy stuck at true.
+        if (ctx.epoch === client.epoch) entryBusy(false);
     }
 }
 
@@ -1199,7 +1207,8 @@ async function joinRoomAsIdentity(gameId) {
     } catch (error) {
         if (matches(ctx)) showToast(readableError(error));
     } finally {
-        if (matches(ctx)) entryBusy(false);
+        // Epoch only - see enterMyGame: the join itself changes the session's gameId.
+        if (ctx.epoch === client.epoch) entryBusy(false);
     }
 }
 
@@ -1223,6 +1232,10 @@ function createIdempotencyKey() { return randomToken(); }
 
 function readableError(error) {
     if (error?.code === "GAME_BUSY") return "该对局正在处理其他请求，请稍后重试";
+    if (error?.code === "CANNOT_JOIN_OWN_GAME") {
+        return "这是你自己创建的对局。请用无痕窗口、另一个浏览器或另一台设备打开邀请链接，以对手身份加入";
+    }
+    if (error?.code === "GAME_ALREADY_FULL") return "该对局已满，双方席位都已有玩家";
     return error?.code ? `${error.code}: ${error.message}` : error?.message || "请求失败，请确认后端正在运行";
 }
 
