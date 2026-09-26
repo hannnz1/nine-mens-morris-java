@@ -356,6 +356,24 @@ public class GameSessionService {
 
         GameSessionEntity entity = findGameForUpdate(id);
         Player player = seatResolver.resolve(entity, bearerToken, legacySeatToken);
+        return applyAction(entity, player, id, idempotencyKey, fingerprint, request);
+    }
+
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public ActionOutcome performBotAction(UUID id, UUID botPlayerId, ActionRequest request) {
+        if (!BotRoster.isBot(botPlayerId) || request == null || request.expectedVersion() == null || request.expectedVersion() < 0)
+            throw new IllegalArgumentException("A seated bot and expected version are required");
+        GameSessionEntity entity = findGameForUpdate(id);
+        Player player = botPlayerId.equals(entity.getWhitePlayerId()) ? Player.WHITE
+                : botPlayerId.equals(entity.getBlackPlayerId()) ? Player.BLACK : null;
+        if (player == null) throw new IllegalArgumentException("Bot is not seated in this game");
+        String key = "bot:" + id + ":" + request.expectedVersion();
+        String fingerprint = tokens.hash("bot:" + botPlayerId + ":" + request.expectedVersion());
+        return applyAction(entity, player, id, key, fingerprint, request);
+    }
+
+    private ActionOutcome applyAction(GameSessionEntity entity, Player player, UUID id, String idempotencyKey,
+                                      String fingerprint, ActionRequest request) {
         // Read after acquiring the game lock so concurrent retries see the committed result.
         // Replay before checking the version/turn, which change after a successful action.
         var previous = idempotencyRecords.findByGameIdAndIdempotencyKey(id, idempotencyKey);
