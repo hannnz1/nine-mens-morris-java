@@ -14,6 +14,7 @@ import java.util.*;
 import static org.assertj.core.api.Assertions.*;
 import static org.awaitility.Awaitility.await;
 @SpringBootTest(properties={"morris.scheduling.enabled=true","morris.bot.think-delay-min-ms=10","morris.bot.think-delay-max-ms=20"})
+@org.springframework.test.annotation.DirtiesContext(classMode=org.springframework.test.annotation.DirtiesContext.ClassMode.AFTER_CLASS)
 class BotSchedulingIntegrationTest extends PostgresIntegrationTest {
     @Autowired GameSessionService games;
     @Autowired PlayerService players;

@@ -43,21 +43,24 @@ public final class BotTurnScheduler implements AutoCloseable {
         try {
             long millis=skipDelay?0:ThreadLocalRandom.current().nextInt(minDelay,maxDelay+1);
             delay.schedule(()->{
-                try { if(closed) inFlight.remove(id); else computation.execute(()->run(id)); }
+                try { long queuedAt=System.nanoTime(); if(closed) inFlight.remove(id); else computation.execute(()->run(id,queuedAt)); }
                 catch(RuntimeException rejected) { inFlight.remove(id); LOG.warn("Bot queue rejected game {}",id,rejected); }
             },millis);
         } catch(RuntimeException rejected) { inFlight.remove(id); LOG.warn("Bot delay rejected game {}",id,rejected); }
     }
-    private void run(UUID id) {
+    private void run(UUID id,long queuedAt) {
         boolean successful=false;
+        double queueMs=(System.nanoTime()-queuedAt)/1_000_000.0;
         try {
             if(closed||!ready.getAsBoolean()) return;
             for(int i=0;i<3;i++) {
                 var game=games.get(id);
                 if(!eligible(game)) { if(!"IN_PROGRESS".equals(game.status())) failures.remove(id); return; }
                 long seed=id.getMostSignificantBits() ^ Long.rotateLeft(id.getLeastSignificantBits(),17) ^ game.version();
+                long searchStarted=System.nanoTime();
                 var action=failures.getOrDefault(id,0)>=3 ? new RandomMover(seed).chooseAction(game.state())
                         : ai.chooseAction(game.state(),game.botDifficulty(),seed,budget);
+                LOG.debug("BOT_TIMING game={} queueMs={} searchMs={}",id,queueMs,(System.nanoTime()-searchStarted)/1_000_000.0);
                 if(closed||Thread.currentThread().isInterrupted())return;
                 var result=games.act(id,BotRoster.id(game.botDifficulty()),
                         new ActionRequest(action.type(),action.from(),action.to(),game.version()));

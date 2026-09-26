@@ -109,4 +109,20 @@ class BotGameIntegrationTest extends PostgresIntegrationTest {
             assertThat(results.stream().filter(r -> "BOT_BUSY".equals(r.getBody().get("code"))).count()).isEqualTo(1);
         } finally { pool.shutdownNow(); }
     }
+    @Test void rematchAndCreateCompeteForTheSameFinalCapacitySlot() throws Exception {
+        String rematcher=human();
+        var old=game(post("/api/v1/games",rematcher,"original",body("WHITE")));
+        post("/api/v1/games/"+old.get("id")+"/resign",rematcher,"finish",Map.of());
+        for(int p=0;p<4;p++){
+            String token=human();for(int n=0;n<(p==3?4:5);n++)game(post("/api/v1/games",token,"fill"+n,body("WHITE")));
+        }
+        String creator=human();var latch=new CountDownLatch(1);var pool=Executors.newFixedThreadPool(2);
+        try{
+            var a=pool.submit(()->{latch.await();return post("/api/v1/games/"+old.get("id")+"/rematch",rematcher,"again",Map.of("action","OFFER"));});
+            var b=pool.submit(()->{latch.await();return post("/api/v1/games",creator,"last",body("WHITE"));});
+            latch.countDown();var results=List.of(a.get(15,TimeUnit.SECONDS),b.get(15,TimeUnit.SECONDS));
+            assertThat(results.stream().filter(r->r.getStatusCode().is2xxSuccessful()).count()).isEqualTo(1);
+            assertThat(results.stream().filter(r->"BOT_BUSY".equals(r.getBody().get("code"))).count()).isEqualTo(1);
+        }finally{pool.shutdownNow();}
+    }
 }

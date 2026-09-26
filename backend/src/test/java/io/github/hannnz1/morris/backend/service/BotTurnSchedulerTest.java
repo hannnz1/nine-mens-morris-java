@@ -80,4 +80,45 @@ class BotTurnSchedulerTest extends PostgresIntegrationTest {
         });
         assertThat(games.get(ids.get(0)).version()).isEqualTo(1);
     }
+    @Test void millAndCaptureFinishWithinTheSameScheduledTask() throws Exception {
+        UUID id=create(PlayerColor.BLACK);
+        var board=new EnumMap<BoardPosition,Piece>(BoardPosition.class);
+        for(var p:BoardPosition.values())board.put(p,Piece.EMPTY);
+        for(var p:List.of(BoardPosition.A1,BoardPosition.D1,BoardPosition.B2))board.put(p,Piece.WHITE);
+        for(var p:List.of(BoardPosition.C3,BoardPosition.D3,BoardPosition.E5))board.put(p,Piece.BLACK);
+        var state=new GameState(board,Player.WHITE,0,0,false,null,20,Map.of(),0,null);
+        jdbc.update("update game_sessions set state_json=? where id=?",new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(state),id);
+        scheduler(new AlphaBetaMorrisAi(),Runnable::run).schedule(id,true);
+        assertThat(games.get(id).status()).isEqualTo("WHITE_WON");
+        assertThat(games.get(id).state().piecesOnBoard(Player.BLACK)).isEqualTo(2);
+        assertThat(games.get(id).version()).isEqualTo(2);
+    }
+    @Test void humanReplyDuringInflightCleanupIsNotLost() {
+        UUID id=create(PlayerColor.BLACK);var ref=new java.util.concurrent.atomic.AtomicReference<BotTurnScheduler>();
+        var replied=new java.util.concurrent.atomic.AtomicBoolean();
+        var racingAccess=new BotGameAccess(games){
+            @Override public GameResponse get(UUID g){return access.get(g);}
+            @Override public ActionOutcome act(UUID g,UUID bot,ActionRequest request){
+                var result=access.act(g,bot,request);
+                if(replied.compareAndSet(false,true)) {
+                    var snapshot=games.get(g);
+                    games.performAction(g,token,null,"fast-human",new ActionRequest(ActionType.PLACE,null,snapshot.legalPlacements().get(0),snapshot.version()));
+                    ref.get().onGameCommitted(games.get(g)); // inFlight still contains id here
+                }
+                return result;
+            }
+        };
+        var s=new BotTurnScheduler(racingAccess,new AlphaBetaMorrisAi(),(r,ms)->r.run(),Runnable::run,()->true,Duration.ofMillis(20),0,0);
+        ref.set(s);s.schedule(id,true);
+        assertThat(games.get(id).version()).isEqualTo(3);
+        assertThat(s.isInFlight(id)).isFalse();
+    }
+    @Test void delayRejectionAndStartupNotReadyLeaveNoInflightTask() {
+        UUID id=create(PlayerColor.BLACK);
+        var s=new BotTurnScheduler(access,new AlphaBetaMorrisAi(),(r,ms)->{throw new RejectedExecutionException();},Runnable::run,()->true,Duration.ofMillis(20),0,0);
+        s.schedule(id,false);assertThat(s.isInFlight(id)).isFalse();
+        var queued=new ArrayList<Runnable>();
+        var notReady=new BotTurnScheduler(access,new AlphaBetaMorrisAi(),(r,ms)->queued.add(r),Runnable::run,()->false,Duration.ofMillis(20),0,0);
+        notReady.schedule(id,false);assertThat(queued).isEmpty();assertThat(notReady.isInFlight(id)).isFalse();
+    }
 }
