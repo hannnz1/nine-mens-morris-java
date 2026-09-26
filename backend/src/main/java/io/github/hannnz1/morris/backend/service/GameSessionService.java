@@ -752,7 +752,8 @@ public class GameSessionService {
                 entity.getCreatedAt(), entity.getUpdatedAt(), clockView(entity),
                 entity.getDrawOfferedBy(), resultView(entity),
                 entity.getRematchOfferedBy(), entity.getRematchGameId(),
-                entity.getWhitePlayerId(), entity.getBlackPlayerId());
+                entity.getWhitePlayerId(), entity.getBlackPlayerId(),
+                TimeControl.label(entity.getBaseMs(), entity.getIncrementMs()));
     }
 
     private ResultView resultView(GameSessionEntity entity) {

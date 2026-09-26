@@ -447,6 +447,64 @@ test('leaving a game refreshes my games so the game just left can be found again
     assert.ok(urls.some(u=>u.includes('/players/me/games')));
 });
 
+// Invite links: with a saved identity, opening ?game=<id> no longer just prefills the join form.
+const inviteHarness=(g)=>{
+    const h=harness();
+    h.run('client.identity={playerId:"me",nickname:"Zhu",clientToken:"x".repeat(43)};');
+    h.ctx.window.location.search='?game='+g.id;
+    h.nodes.get('inviteCard').hidden=true; // as in index.html: the card starts hidden
+    const calls=[];
+    h.ctx.fetch=async(url,req)=>{calls.push(`${req.method} ${url}`);
+        if(url.endsWith('/join'))return response({game:{...g,status:'IN_PROGRESS',blackPlayer:'Zhu',blackPlayerId:'me'}});
+        return response(g);};
+    return {h,calls};
+};
+const settle=async()=>{for(let i=0;i<4;i++)await new Promise(setImmediate);};
+
+test('an invite to someone else\'s waiting game shows a confirmation card and does not join yet',async()=>{
+    const g=identityGame(B,'host',null);g.whitePlayer='Han';g.blackPlayer=null;g.status='WAITING_FOR_PLAYER';g.timeControl='5+3';
+    const {h,calls}=inviteHarness(g);
+    await h.run('openSharedInvite()');
+    assert.strictEqual(h.nodes.get('inviteCard').hidden,false);
+    assert.match(h.nodes.get('inviteTitle').textContent,/Han/);
+    assert.match(h.nodes.get('inviteDetail').textContent,/5\+3/);
+    assert.ok(!calls.some(c=>c.endsWith('/join')));
+});
+
+test('confirming the invite card joins as black and hides the card',async()=>{
+    const g=identityGame(B,'host',null);g.whitePlayer='Han';g.blackPlayer=null;g.status='WAITING_FOR_PLAYER';g.timeControl='3+2';
+    const {h,calls}=inviteHarness(g);
+    await h.run('openSharedInvite()');
+    await h.run('acceptInvite()');await settle();
+    assert.ok(calls.some(c=>c===`POST /api/v1/games/${B}/join`));
+    assert.strictEqual(h.run('client.session.gameId'),B);
+    assert.strictEqual(h.run('client.session.side'),'BLACK');
+    assert.strictEqual(h.nodes.get('inviteCard').hidden,true);
+});
+
+test('opening the invite to your own game enters it directly, with no card',async()=>{
+    const g=identityGame(B,'me',null);g.blackPlayer=null;g.status='WAITING_FOR_PLAYER';
+    const {h,calls}=inviteHarness(g);
+    await h.run('openSharedInvite()');await settle();
+    assert.strictEqual(h.nodes.get('inviteCard').hidden,true);
+    assert.strictEqual(h.run('client.session.gameId'),B);
+    assert.strictEqual(h.run('client.session.side'),'WHITE');
+    assert.ok(!calls.some(c=>c.endsWith('/join')));
+});
+
+test('an invite to a full or finished game explains why instead of showing the card',async()=>{
+    const full=identityGame(B,'host','other');full.status='IN_PROGRESS';
+    let {h}=inviteHarness(full);
+    await h.run('openSharedInvite()');
+    assert.strictEqual(h.nodes.get('inviteCard').hidden,true);
+    assert.match(h.nodes.get('toast').textContent,/已满/);
+    const done=identityGame(B,'host',null);done.blackPlayer=null;done.status='CANCELLED';
+    ({h}=inviteHarness(done));
+    await h.run('openSharedInvite()');
+    assert.strictEqual(h.nodes.get('inviteCard').hidden,true);
+    assert.match(h.nodes.get('toast').textContent,/已结束|无法加入/);
+});
+
 test('joining your own game explains how to join as the opponent in Chinese',()=>{
     const h=harness();
     h.ctx.err={code:'CANNOT_JOIN_OWN_GAME',message:'Use a different browser or device to join as the other player'};

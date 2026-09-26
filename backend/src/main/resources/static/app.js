@@ -89,6 +89,11 @@ const elements = {
     roomCodeText: document.getElementById("roomCodeText"),
     copyRoomCode: document.getElementById("copyRoomCode"),
     myGamesList: document.getElementById("my-games-list"),
+    inviteCard: document.getElementById("inviteCard"),
+    inviteTitle: document.getElementById("inviteTitle"),
+    inviteDetail: document.getElementById("inviteDetail"),
+    inviteJoin: document.getElementById("inviteJoin"),
+    inviteDismiss: document.getElementById("inviteDismiss"),
     roomCodeInput: document.getElementById("roomCodeInput"),
     roomCodeJoinButton: document.getElementById("roomCodeJoinButton"),
     whiteClock: document.getElementById("whiteClock"),
@@ -131,7 +136,8 @@ const client = {
     roomCode: null,
     clockTimer: null,
     clockSkewMs: 0,
-    presence: null
+    presence: null,
+    invite: null // gameId of the invite card currently on screen
 };
 
 initializeBoard();
@@ -176,11 +182,54 @@ function bindEvents() {
     elements.rematchButton.addEventListener("click", () => void offerRematch("OFFER"));
     elements.rematchAcceptButton.addEventListener("click", () => void offerRematch("ACCEPT"));
     elements.rematchDeclineButton.addEventListener("click", () => void offerRematch("DECLINE"));
+    elements.inviteJoin.addEventListener("click", () => void acceptInvite());
+    elements.inviteDismiss.addEventListener("click", hideInvite);
 }
 
 function prefillSharedGame() {
     const sharedId = new URLSearchParams(window.location.search).get("game");
     if (sharedId) elements.joinGameId.value = sharedId;
+}
+
+// Invite link with a saved identity: one confirmation instead of the old prefilled join form.
+// Your own game (either seat) opens straight away; someone else's waiting game asks once, showing
+// the host and time control; a full or finished game says why it can't be joined. Runs after the
+// identity is known (ensureIdentity), and never interrupts a game this tab is already in.
+async function openSharedInvite() {
+    const sharedId = (new URLSearchParams(window.location.search).get("game") || "").toLowerCase();
+    if (!client.identity || client.active || client.entryBusy
+            || !/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(sharedId)) return;
+    let game;
+    try {
+        game = await api(`/api/v1/games/${sharedId}`);
+    } catch (error) {
+        showToast(error.code === "GAME_NOT_FOUND" ? "邀请链接中的对局不存在" : readableError(error));
+        return;
+    }
+    if (client.active) return; // something else entered a game meanwhile
+    if (mySide(game)) {
+        void enterMyGame(game.id);
+        return;
+    }
+    if (game.status === "WAITING_FOR_PLAYER" && !game.blackPlayerId && !game.blackPlayer) {
+        client.invite = game.id;
+        elements.inviteTitle.textContent = `加入 ${game.whitePlayer} 的对局？`;
+        elements.inviteDetail.textContent = `计时 ${game.timeControl || "不限时"} · 你将执黑，白方先手。`;
+        elements.inviteCard.hidden = false;
+        return;
+    }
+    showToast(game.status === "IN_PROGRESS" ? "该对局已满，双方席位都已有玩家" : "该对局已结束，无法加入");
+}
+
+async function acceptInvite() {
+    const gameId = client.invite;
+    hideInvite();
+    if (gameId) await joinRoomAsIdentity(gameId);
+}
+
+function hideInvite() {
+    client.invite = null;
+    elements.inviteCard.hidden = true;
 }
 
 function loadSaved() {
@@ -1069,6 +1118,7 @@ async function ensureIdentity() {
     const joinNameField = elements.joinForm.elements.blackPlayer;
     if (joinNameField) joinNameField.value = client.identity.nickname;
     void renderMyGames();
+    void openSharedInvite();
 }
 
 async function renderMyGames() {

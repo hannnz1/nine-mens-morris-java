@@ -14,6 +14,15 @@ public record TimeControl(int baseMs, int incrementMs) {
             "10+5", new TimeControl(10 * 60_000, 5_000)
     );
 
+    // The display label for stored base/increment millis (e.g. 300_000 / 3_000 -> "5+3"), or
+    // null when the game has no time control.
+    public static String label(Integer baseMs, Integer incrementMs) {
+        if (baseMs == null || incrementMs == null) {
+            return null;
+        }
+        return (baseMs / 60_000) + "+" + (incrementMs / 1_000);
+    }
+
     public static TimeControl parse(String label) {
         if (label == null) {
             return DEFAULT;
