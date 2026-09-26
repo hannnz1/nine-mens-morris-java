@@ -44,13 +44,15 @@ public class GameFinisher {
     private final GameWebSocketHandler gameUpdates;
     private final ObjectMapper objectMapper;
     private final Clock clock;
+    private final org.springframework.context.ApplicationEventPublisher events;
 
     public GameFinisher(GameSessionRepository games, GameWebSocketHandler gameUpdates,
-                         ObjectMapper objectMapper, Clock clock) {
+                         ObjectMapper objectMapper, Clock clock, org.springframework.context.ApplicationEventPublisher events) {
         this.games = games;
         this.gameUpdates = gameUpdates;
         this.objectMapper = objectMapper;
         this.clock = clock;
+        this.events = events;
     }
 
     /**
@@ -161,6 +163,8 @@ public class GameFinisher {
                 } catch (RuntimeException exception) {
                     LOGGER.warn("Committed game {} finish could not be broadcast", gameId, exception);
                 }
+                try { events.publishEvent(new GameCommittedEvent(response)); }
+                catch (RuntimeException exception) { LOGGER.warn("Committed finish {} could not notify bot scheduler", gameId, exception); }
             }
         });
     }

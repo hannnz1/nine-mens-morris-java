@@ -68,6 +68,7 @@ public class GameSessionService {
     private final GameFinisher finisher;
     private final PlayerRepository playerRepository;
     private final BotCapacityGuard botCapacity;
+    private final org.springframework.context.ApplicationEventPublisher events;
     private final java.security.SecureRandom botColors = new java.security.SecureRandom();
 
     public GameSessionService(GameSessionRepository games,
@@ -81,7 +82,8 @@ public class GameSessionService {
                               RateLimiter rateLimiter,
                               Clock clock,
                               GameFinisher finisher,
-                              PlayerRepository playerRepository, BotCapacityGuard botCapacity) {
+                              PlayerRepository playerRepository, BotCapacityGuard botCapacity,
+                              org.springframework.context.ApplicationEventPublisher events) {
         this.games = games;
         this.idempotencyRecords = idempotencyRecords;
         this.tokens = tokens;
@@ -95,6 +97,7 @@ public class GameSessionService {
         this.finisher = finisher;
         this.playerRepository = playerRepository;
         this.botCapacity = botCapacity;
+        this.events = events;
     }
 
     @Transactional
@@ -874,6 +877,8 @@ public class GameSessionService {
                     // The transaction is already committed; snapshot reads recover missed notifications.
                     LOGGER.warn("Committed game {} version {} could not be broadcast", gameId, response.version(), exception);
                 }
+                try { events.publishEvent(new GameCommittedEvent(response)); }
+                catch (RuntimeException exception) { LOGGER.warn("Committed game {} could not schedule a bot", gameId, exception); }
             }
         });
     }

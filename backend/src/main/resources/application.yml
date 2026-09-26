@@ -36,6 +36,14 @@ spring:
       pool:
         size: 4
 
+morris:
+  bot:
+    threads: ${BOT_THREADS:1}
+    max-active-games: ${BOT_MAX_ACTIVE_GAMES:20}
+    hard-budget-ms: ${BOT_HARD_BUDGET_MS:800}
+    think-delay-min-ms: ${BOT_THINK_DELAY_MIN_MS:400}
+    think-delay-max-ms: ${BOT_THINK_DELAY_MAX_MS:800}
+
 management:
   endpoints:
     web:
