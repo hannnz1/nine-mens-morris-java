@@ -88,10 +88,10 @@ class BotTurnSchedulerTest extends PostgresIntegrationTest {
         for(var p:List.of(BoardPosition.C3,BoardPosition.D3,BoardPosition.E5))board.put(p,Piece.BLACK);
         var state=new GameState(board,Player.WHITE,0,0,false,null,20,Map.of(),0,null);
         jdbc.update("update game_sessions set state_json=? where id=?",new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(state),id);
-        scheduler(new AlphaBetaMorrisAi(),Runnable::run).schedule(id,true);
+        scheduler((position,d,seed,budget)->new AlphaBetaMorrisAi().chooseAction(position,Difficulty.MEDIUM,seed,budget),Runnable::run).schedule(id,true);
         assertThat(games.get(id).status()).isEqualTo("WHITE_WON");
         assertThat(games.get(id).state().piecesOnBoard(Player.BLACK)).isEqualTo(2);
-        assertThat(games.get(id).version()).isEqualTo(2);
+        assertThat(jdbc.queryForObject("select count(*) from idempotency_records where game_id=?",Integer.class,id)).isEqualTo(2);
     }
     @Test void humanReplyDuringInflightCleanupIsNotLost() {
         UUID id=create(PlayerColor.BLACK);var ref=new java.util.concurrent.atomic.AtomicReference<BotTurnScheduler>();

@@ -57,7 +57,10 @@ async function main() {
     let background;
     try {
         for(let i=0;i<80;i++)await humanStep();
-        const baseline=[];for(let i=0;i<sampleCount;i++)baseline.push(await humanStep());
+        const baseline=[];for(let i=0;i<sampleCount;i++){
+            baseline.push(await humanStep());
+            await new Promise(r=>setTimeout(r,40));
+        }
         const bots=[];
         for(let i=0;i<20;i++){
             const owner=owners[Math.floor(i/5)];

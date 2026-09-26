@@ -23,6 +23,15 @@ class BotActionIntegrationTest extends PostgresIntegrationTest {
     }
     @AfterEach void cleanup() { jdbc.update("update game_sessions set status='CANCELLED' where id=?",id); }
     ActionRequest place(BoardPosition p,long v) { return new ActionRequest(ActionType.PLACE,null,p,v); }
+    @Test void publicActionsCannotOccupyTheInternalBotKeyNamespace() {
+        games.performBotAction(id,BotRoster.id(Difficulty.EASY),place(BoardPosition.A1,0));
+        assertThatThrownBy(() -> games.performAction(id,token,null,"bot:"+id+":2",place(BoardPosition.D1,1)))
+                .isInstanceOf(ApiException.class).hasFieldOrPropertyWithValue("code","INVALID_IDEMPOTENCY_KEY");
+        assertThat(games.get(id).version()).isEqualTo(1);
+        games.performAction(id,token,null,"human-action",place(BoardPosition.D1,1));
+        games.performBotAction(id,BotRoster.id(Difficulty.EASY),place(BoardPosition.G1,2));
+        assertThat(games.get(id).version()).isEqualTo(3);
+    }
     @Test void sameVersionDifferentMovesReplayExactlyOneWrite() {
         var first=games.performBotAction(id,BotRoster.id(Difficulty.EASY),place(BoardPosition.A1,0));
         var replay=games.performBotAction(id,BotRoster.id(Difficulty.EASY),place(BoardPosition.D1,0));

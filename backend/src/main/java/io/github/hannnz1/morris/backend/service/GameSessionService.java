@@ -865,6 +865,10 @@ public class GameSessionService {
             throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_IDEMPOTENCY_KEY",
                     "Idempotency-Key must contain between 1 and 100 characters");
         }
+        if (key.startsWith("bot:")) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_IDEMPOTENCY_KEY",
+                    "The bot: prefix is reserved for internal bot actions");
+        }
     }
 
     private void publishAfterCommit(UUID gameId, GameResponse response) {
