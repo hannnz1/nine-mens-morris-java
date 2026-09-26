@@ -14,6 +14,12 @@
     <artifactId>game-engine</artifactId>
     <name>Nine Men's Morris - Game Engine</name>
 
+    <properties><ai.excludedGroups>strength</ai.excludedGroups></properties>
+    <build><plugins><plugin>
+        <groupId>org.apache.maven.plugins</groupId><artifactId>maven-surefire-plugin</artifactId>
+        <configuration><excludedGroups>${ai.excludedGroups}</excludedGroups><argLine>-Xmx512m</argLine></configuration>
+    </plugin></plugins></build>
+    <profiles><profile><id>strength</id><properties><ai.excludedGroups>no-such-tag</ai.excludedGroups></properties></profile></profiles>
     <dependencies>
         <dependency>
             <groupId>org.junit.jupiter</groupId>

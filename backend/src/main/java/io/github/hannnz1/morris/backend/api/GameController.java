@@ -52,9 +52,27 @@ public class GameController {
                                      // the request body once, so both branches extract their own fields from the same
                                      // parsed JSON below.
                                      @RequestBody(required = false) JsonNode body) {
+        String opponent = strictText(body, "opponent");
+        if (opponent != null && !opponent.equals("HUMAN") && !opponent.equals("BOT"))
+            throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "opponent must be HUMAN or BOT");
+        if ("BOT".equals(opponent) && (authorization == null || !authorization.startsWith("Bearer ")))
+            throw new ApiException(HttpStatus.UNAUTHORIZED, "AUTH_REQUIRED", "A Bearer player token is required");
         if (authorization != null && authorization.startsWith("Bearer ")) {
             if (idempotencyKey == null || idempotencyKey.isBlank() || idempotencyKey.length() > 100) {
                 throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "Idempotency-Key is required");
+            }
+            if ("BOT".equals(opponent)) {
+                io.github.hannnz1.morris.engine.ai.Difficulty difficulty;
+                GameApiDtos.PlayerColor color;
+                try {
+                    difficulty = io.github.hannnz1.morris.engine.ai.Difficulty.valueOf(strictText(body, "difficulty"));
+                    String rawColor = strictText(body, "color");
+                    color = rawColor == null ? GameApiDtos.PlayerColor.RANDOM : GameApiDtos.PlayerColor.valueOf(rawColor);
+                } catch (IllegalArgumentException | NullPointerException invalid) {
+                    throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "Invalid bot difficulty or color");
+                }
+                return gameSessions.createBotGame(players.requirePlayer(authorization.substring(7)), idempotencyKey,
+                        new GameApiDtos.BotGameRequest(difficulty, color, strictText(body, "timeControl")));
             }
             CreateGameRequestForPlayer request = new CreateGameRequestForPlayer(textOrNull(body, "timeControl"));
             return gameSessions.createForPlayer(players.requirePlayer(authorization.substring(7)), idempotencyKey,
@@ -74,6 +92,12 @@ public class GameController {
             throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "The request is invalid", fieldErrors);
         }
         return gameSessions.create(legacyRequest);
+    }
+
+    private String strictText(JsonNode body, String field) {
+        if (body == null || !body.hasNonNull(field)) return null;
+        if (!body.get(field).isTextual()) throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", field + " must be text");
+        return body.get(field).asText();
     }
 
     private String textOrNull(JsonNode body, String field) {

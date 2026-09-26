@@ -75,6 +75,26 @@
                 <button class="button button-dark" type="submit">创建并进入棋盘 <span>→</span></button>
             </form>
 
+            <form class="entry-card bot-card" id="botForm">
+                <div class="entry-number">AI</div>
+                <div><p class="card-kicker">随时开局</p><h2>和电脑下一局</h2><p>选择难度和执子，电脑会自动应手。</p></div>
+                <fieldset class="bot-options"><legend>难度</legend>
+                    <label><input type="radio" name="difficulty" value="EASY"><span>简单</span></label>
+                    <label><input type="radio" name="difficulty" value="MEDIUM" checked><span>中等</span></label>
+                    <label><input type="radio" name="difficulty" value="HARD"><span>困难</span></label>
+                </fieldset>
+                <fieldset class="bot-options"><legend>执子</legend>
+                    <label><input type="radio" name="color" value="WHITE"><span>执白</span></label>
+                    <label><input type="radio" name="color" value="RANDOM" checked><span>随机</span></label>
+                    <label><input type="radio" name="color" value="BLACK"><span>执黑</span></label>
+                </fieldset>
+                <fieldset class="bot-options"><legend>计时</legend>
+                    <label><input type="radio" name="timeControl" value="3+2"><span>3+2</span></label>
+                    <label><input type="radio" name="timeControl" value="5+3" checked><span>5+3</span></label>
+                    <label><input type="radio" name="timeControl" value="10+5"><span>10+5</span></label>
+                </fieldset>
+                <button class="button button-dark" type="submit">开始对局 <span>→</span></button>
+            </form>
             <form class="entry-card" id="joinForm">
                 <div class="entry-number">02</div>
                 <div>
@@ -143,7 +163,7 @@
                 <button class="text-button" id="copyGameId" type="button" disabled>复制邀请链接</button>
                 <input id="inviteLink" class="invite-link" aria-label="邀请链接，可选择复制" readonly hidden>
             </div>
-            <div class="game-id-block">
+            <div class="game-id-block" id="roomCodeBlock">
                 <span>房间码</span>
                 <code id="roomCodeText">仅创建对局时可见</code>
                 <button class="text-button" id="copyRoomCode" type="button" disabled>复制房间码</button>

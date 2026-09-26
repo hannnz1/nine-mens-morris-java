@@ -137,7 +137,8 @@ const client = {
     clockTimer: null,
     clockSkewMs: 0,
     presence: null,
-    invite: null // gameId of the invite card currently on screen
+    invite: null, // gameId of the invite card currently on screen
+    pendingCreate: null
 };
 
 initializeBoard();
@@ -165,6 +166,7 @@ function initializeBoard() {
 
 function bindEvents() {
     elements.createForm.addEventListener("submit", createGame);
+    document.getElementById("botForm").addEventListener("submit", createBotGame);
     elements.joinForm.addEventListener("submit", joinGame);
     elements.copyGameId.addEventListener("click", copyGameId);
     elements.leaveGame.addEventListener("click", leaveGame);
@@ -197,7 +199,7 @@ function prefillSharedGame() {
 // identity is known (ensureIdentity), and never interrupts a game this tab is already in.
 async function openSharedInvite() {
     const sharedId = (new URLSearchParams(window.location.search).get("game") || "").toLowerCase();
-    if (!client.identity || client.active || client.entryBusy
+    if (!client.identity || client.active || client.entryBusy || loadSaved().pendingCreate
             || !/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(sharedId)) return;
     let game;
     try {
@@ -246,6 +248,7 @@ function entryBusy(busy) {
     client.entryBusy = busy;
     setFormBusy(elements.createForm, busy);
     setFormBusy(elements.joinForm, busy);
+    setFormBusy(document.getElementById("botForm"), busy);
     document.getElementById("recoverSession").disabled = busy;
     document.getElementById("clearSession").disabled = busy;
 }
@@ -256,9 +259,11 @@ async function restoreSession() {
     client.session = saved.session || null;
     client.pendingJoin = saved.pendingJoin || null;
     client.pendingAction = saved.pendingAction || null;
+    client.pendingCreate = saved.pendingCreate || null;
     client.roomCode = saved.roomCode || null;
     client.epoch++;
     client.game = null;
+    if (client.pendingCreate) return resumeBotCreate();
     if (client.pendingJoin) return resumeJoin();
     if (!client.session?.gameId || !client.session?.token || !client.session?.side) {
         showSetup();
@@ -285,6 +290,10 @@ async function restoreSession() {
 function mayStartEntry() {
     if (client.entryBusy) return false;
     const saved = loadSaved();
+    if (saved.pendingCreate) {
+        showToast("开局结果尚未确认，请点击恢复对局重试原请求。");
+        return false;
+    }
     // A saved identity (Bearer) game with nothing in flight can simply be replaced: that game is
     // always recoverable later through 我的对局 / the player identity. What must never be dropped
     // silently is an unconfirmed action or join, or a legacy anonymous seat credential (the only
@@ -325,6 +334,47 @@ async function createGame(event) {
         if (client.identity) void renderMyGames();
     } catch (error) { if (ctx.epoch === client.epoch) showToast(readableError(error)); }
     finally { if (ctx.epoch === client.epoch) entryBusy(false); }
+}
+
+async function createBotGame(event) {
+    event?.preventDefault();
+    if (!client.identity) { showToast("玩家身份正在准备，请稍后再试。"); return; }
+    if (!mayStartEntry()) return;
+    const form = document.getElementById("botForm");
+    client.pendingCreate = { key: randomToken(), playerId: client.identity.playerId,
+        body: { opponent: "BOT", difficulty: form.elements.difficulty?.value || "MEDIUM",
+            color: form.elements.color?.value || "RANDOM", timeControl: form.elements.timeControl?.value || "5+3" } };
+    try { saveSession(); }
+    catch { client.pendingCreate = null; showToast("无法保存开局请求，操作未发送。"); return; }
+    await resumeBotCreate();
+}
+
+async function resumeBotCreate() {
+    const pending = client.pendingCreate;
+    if (!pending || client.entryBusy) return;
+    if (!client.identity || pending.playerId !== client.identity.playerId) {
+        showSetup(); showToast("请恢复原玩家身份后重试开局，或清除本标签页保存的请求。"); return;
+    }
+    const ctx = context();
+    entryBusy(true);
+    try {
+        const response = await api("/api/v1/games", { method: "POST",
+            headers: { ...authHeader(client.identity.clientToken), "Idempotency-Key": pending.key }, body: pending.body });
+        if (!matches(ctx)) return;
+        const side = mySide(response.game);
+        if (!side) throw new Error("无法确认你的席位，请恢复对局重试。");
+        client.session = { gameId: response.game.id, token: client.identity.clientToken, side,
+            playerName: client.identity.nickname, bearer: true };
+        client.pendingCreate = null; client.roomCode = null;
+        saveSession();
+        enterGame(response.game, "人机对局已开始");
+        void renderMyGames();
+    } catch (error) {
+        if (!matches(ctx)) return;
+        if (!transient(error)) { client.pendingCreate = null; saveSession(); }
+        showSetup();
+        showToast(transient(error) ? "开局结果尚未确认，已保留请求。请点击恢复对局重试。" : readableError(error));
+    } finally { if (ctx.epoch === client.epoch) entryBusy(false); }
 }
 
 async function joinGame(event) {
@@ -385,6 +435,7 @@ function clearSession() {
     client.pendingJoin = null;
     client.pendingAction = null;
     client.roomCode = null;
+    client.pendingCreate = null;
     showSetup();
     setConnection("offline", "尚未进入对局");
     showToast("本标签页保存的对局已清除");
@@ -410,7 +461,7 @@ function enterGame(game, message) {
 
 function showSetup() {
     const saved = loadSaved();
-    document.getElementById("recoveryCard").hidden = !(saved.session || saved.pendingJoin);
+    document.getElementById("recoveryCard").hidden = !(saved.session || saved.pendingJoin || saved.pendingCreate);
     elements.setupPanel.hidden = false;
     elements.gamePanel.hidden = true;
 }
@@ -599,6 +650,8 @@ function applyGame(game, source) {
 
 function renderGame() {
     if (!client.game || !client.session) return;
+    elements.copyGameId.hidden = Boolean(client.game.botSide);
+    document.getElementById("roomCodeBlock").hidden = Boolean(client.game.botSide);
     const game = client.game;
     const state = game.state;
     document.getElementById("retryAction").hidden = !client.pendingAction;
@@ -669,6 +722,7 @@ function actionPrompt() {
     if (client.pendingAction) return client.retryBusy ? "正在确认你的操作…" : "操作结果未确认，请点击重试";
     if (game.status === "WAITING_FOR_PLAYER") return "等待黑方加入，复制邀请链接发给朋友";
     if (game.status !== "IN_PROGRESS") return `${resultText(game)}，对局结束`;
+    if (game.botSide && game.state.currentPlayer === game.botSide) return "电脑思考中…";
     if (game.state.currentPlayer !== client.session.side) return `等待${sideLabel(game.state.currentPlayer)}操作，棋盘会自动同步`;
     if (client.pendingAction) return "有未确认操作，请等待或点击重试";
     if (game.phase === "PLACING") return "轮到你了：选择一个高亮棋位放置棋子";
@@ -784,6 +838,7 @@ function renderActions() {
         else box.hidden = true;
     } else if (game.status === "IN_PROGRESS") {
         if (elements.resignButton) elements.resignButton.hidden = false;
+        if (game.botSide) return;
         if (game.drawOfferedBy && game.drawOfferedBy !== mySideVal) {
             if (elements.drawAcceptButton) elements.drawAcceptButton.hidden = false;
             if (elements.drawDeclineButton) elements.drawDeclineButton.hidden = false;
@@ -813,6 +868,7 @@ function updatePresence(white, black) {
 
 function renderPresence() {
     if (!elements.opponentPresence) return;
+    if (client.game?.botSide) { elements.opponentPresence.textContent = "电脑在线"; return; }
     if (!client.session || !client.presence) {
         elements.opponentPresence.textContent = "—";
         return;
@@ -1047,7 +1103,7 @@ function setFormBusy(form, busy) {
 
 function saveSession() {
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ session: client.session,
-        pendingJoin: client.pendingJoin, pendingAction: client.pendingAction, roomCode: client.roomCode }));
+        pendingJoin: client.pendingJoin, pendingAction: client.pendingAction, pendingCreate: client.pendingCreate, roomCode: client.roomCode }));
 }
 
 function setSharedGameInUrl(gameId) {
@@ -1118,7 +1174,8 @@ async function ensureIdentity() {
     const joinNameField = elements.joinForm.elements.blackPlayer;
     if (joinNameField) joinNameField.value = client.identity.nickname;
     void renderMyGames();
-    void openSharedInvite();
+    if (loadSaved().pendingCreate) void restoreSession();
+    else void openSharedInvite();
 }
 
 async function renderMyGames() {
@@ -1181,6 +1238,7 @@ function resultReasonLabel(reason) {
 
 async function enterMyGame(gameId) {
     if (!client.identity || client.entryBusy) return;
+    if (loadSaved().pendingCreate) { showToast("请先恢复未确认的开局请求。"); return; }
     if (client.active) leaveGame();
     client.epoch++;
     client.game = null;
@@ -1247,6 +1305,7 @@ async function lookupRoomCode() {
 }
 
 async function joinRoomAsIdentity(gameId) {
+    if (loadSaved().pendingCreate) { showToast("请先恢复未确认的开局请求。"); return; }
     if (client.entryBusy) return;
     if (client.active) leaveGame();
     client.epoch++;
@@ -1294,6 +1353,7 @@ function randomToken() {
 function createIdempotencyKey() { return randomToken(); }
 
 function readableError(error) {
+    if (error?.code === "BOT_BUSY") return "电脑对手繁忙，请稍后再试";
     if (error?.code === "GAME_BUSY") return "该对局正在处理其他请求，请稍后重试";
     if (error?.code === "CANNOT_JOIN_OWN_GAME") {
         return "这是你自己创建的对局。请用无痕窗口、另一个浏览器或另一台设备打开邀请链接，以对手身份加入";

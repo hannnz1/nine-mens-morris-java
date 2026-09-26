@@ -13,6 +13,10 @@ import java.util.Optional;
 import java.util.UUID;
 
 public interface GameSessionRepository extends JpaRepository<GameSessionEntity, UUID> {
+    @Query("select count(g) from GameSessionEntity g where g.status = 'IN_PROGRESS' and (g.whitePlayerId in :ids or g.blackPlayerId in :ids)")
+    long countBotGames(@Param("ids") List<UUID> ids);
+    @Query("select g.id from GameSessionEntity g where g.status = 'IN_PROGRESS' and (g.whitePlayerId in :ids or g.blackPlayerId in :ids) and g.turnStartedAt < :before order by g.turnStartedAt")
+    List<UUID> findStalledBotGames(@Param("ids") List<UUID> ids, @Param("before") Instant before, org.springframework.data.domain.Limit limit);
     // All writes to an existing game acquire this lock before checking its state.
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select game from GameSessionEntity game where game.id = :id")

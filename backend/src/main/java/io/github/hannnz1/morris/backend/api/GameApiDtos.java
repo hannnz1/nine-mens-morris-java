@@ -43,6 +43,9 @@ public final class GameApiDtos {
 
     public record CreateGameRequestForPlayer(String timeControl) {
     }
+    public enum PlayerColor { WHITE, BLACK, RANDOM }
+    public record BotGameRequest(io.github.hannnz1.morris.engine.ai.Difficulty difficulty,
+                                 PlayerColor color, String timeControl) {}
 
     public record CreateGameResponse(
             GameResponse game,
@@ -90,7 +93,9 @@ public final class GameApiDtos {
             UUID blackPlayerId,
             // "3+2" / "5+3" / "10+5", or null for a clockless (legacy anonymous) game. Known before
             // anyone joins, unlike the clock, which stays all zeros until Black is seated.
-            String timeControl
+            String timeControl,
+            Player botSide,
+            io.github.hannnz1.morris.engine.ai.Difficulty botDifficulty
     ) {
     }
 
