@@ -766,8 +766,11 @@ public class GameSessionService {
         if (entity.getTurnDeadlineAt() == null) {
             return new ClockView(0, 0, false, clock.instant(), null); // pre-clock game (WAITING, or pre-M2)
         }
+        // The stored deadline is kept after a finish (a non-null deadline is what marks a clocked
+        // game), but a stopped clock has no turn deadline to show.
+        boolean running = "IN_PROGRESS".equals(entity.getStatus());
         return new ClockView(entity.getWhiteRemainingMs(), entity.getBlackRemainingMs(),
-                "IN_PROGRESS".equals(entity.getStatus()), clock.instant(), entity.getTurnDeadlineAt());
+                running, clock.instant(), running ? entity.getTurnDeadlineAt() : null);
     }
 
     private GameState readState(GameSessionEntity entity) {
