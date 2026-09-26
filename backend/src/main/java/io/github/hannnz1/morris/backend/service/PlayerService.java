@@ -44,7 +44,7 @@ public class PlayerService {
         String tokenHash = tokens.hash(request.clientToken());
 
         return players.findByTokenHash(tokenHash)
-                .map(this::toResponse)
+                .map(player -> toResponse(requireHuman(player)))
                 .orElseGet(() -> {
                     Instant now = Instant.now();
                     PlayerEntity saved = players.saveAndFlush(
@@ -77,9 +77,17 @@ public class PlayerService {
         }
         PlayerEntity player = players.findByTokenHash(tokens.hash(bearerToken))
                 .orElseThrow(() -> new ApiException(HttpStatus.UNAUTHORIZED, "AUTH_REQUIRED", "Unknown player token"));
+        requireHuman(player);
         Instant now = Instant.now();
         if (Duration.between(player.getLastSeenAt(), now).compareTo(LAST_SEEN_UPDATE_THRESHOLD) > 0) {
             player.touchLastSeen(now);
+        }
+        return player;
+    }
+
+    private PlayerEntity requireHuman(PlayerEntity player) {
+        if (!"HUMAN".equals(player.getKind())) {
+            throw new ApiException(HttpStatus.UNAUTHORIZED, "AUTH_REQUIRED", "A human player credential is required");
         }
         return player;
     }

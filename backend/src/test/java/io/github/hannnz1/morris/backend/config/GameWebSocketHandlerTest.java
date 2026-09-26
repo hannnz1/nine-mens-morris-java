@@ -181,6 +181,6 @@ class GameWebSocketHandlerTest {
         return new GameResponse(gameId, version, "Alice", "Bob", "IN_PROGRESS", state.phase(), state,
                 List.of(), Map.of(), List.of(), Instant.now(), Instant.now(),
                 new io.github.hannnz1.morris.backend.api.GameApiDtos.ClockView(0, 0, false, Instant.now(), null),
-                null, null, null, null, null, null, null);
+                null, null, null, null, null, null, null, null, null);
     }
 }

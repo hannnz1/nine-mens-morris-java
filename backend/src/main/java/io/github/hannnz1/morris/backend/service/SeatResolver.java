@@ -54,7 +54,8 @@ public class SeatResolver {
     }
 
     private Player matchPlayerId(GameSessionEntity game, String tokenHash) {
-        UUID playerId = players.findByTokenHash(tokenHash).map(p -> p.getId()).orElse(null);
+        UUID playerId = players.findByTokenHash(tokenHash).filter(p -> "HUMAN".equals(p.getKind()))
+                .map(p -> p.getId()).orElse(null);
         if (playerId == null) {
             return null;
         }

@@ -753,7 +753,9 @@ public class GameSessionService {
                 entity.getDrawOfferedBy(), resultView(entity),
                 entity.getRematchOfferedBy(), entity.getRematchGameId(),
                 entity.getWhitePlayerId(), entity.getBlackPlayerId(),
-                TimeControl.label(entity.getBaseMs(), entity.getIncrementMs()));
+                TimeControl.label(entity.getBaseMs(), entity.getIncrementMs()),
+                BotRoster.side(entity.getWhitePlayerId(), entity.getBlackPlayerId()),
+                BotRoster.difficulty(entity.getWhitePlayerId(), entity.getBlackPlayerId()));
     }
 
     private ResultView resultView(GameSessionEntity entity) {
