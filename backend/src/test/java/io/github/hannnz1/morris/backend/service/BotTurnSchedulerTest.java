@@ -32,6 +32,28 @@ class BotTurnSchedulerTest extends PostgresIntegrationTest {
     BotTurnScheduler scheduler(MorrisAi ai, java.util.concurrent.Executor executor) {
         return new BotTurnScheduler(access,ai,(task,delay)->task.run(),executor,()->true,Duration.ofMillis(20),0,0);
     }
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans={false,true})
+    void lateFailureCannotResurrectStateAfterTerminationOrClose(boolean close) throws Exception {
+        UUID id=create(PlayerColor.BLACK);
+        var started=new java.util.concurrent.CountDownLatch(1);
+        var release=new java.util.concurrent.CountDownLatch(1);
+        var pool=java.util.concurrent.Executors.newSingleThreadExecutor();
+        var s=scheduler((state,d,seed,b)->{
+            started.countDown();
+            try{if(!release.await(10,java.util.concurrent.TimeUnit.SECONDS))throw new IllegalStateException("timeout");}
+            catch(InterruptedException e){Thread.currentThread().interrupt();throw new IllegalStateException(e);}
+            throw new IllegalStateException("late search failure");
+        },pool);
+        try{
+            s.schedule(id,true);assertThat(started.await(5,java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+            if(close)s.close();else s.onGameCommitted(games.resign(id,token,"finish"));
+            release.countDown();pool.submit(()->{}).get(10,java.util.concurrent.TimeUnit.SECONDS);
+            assertThat((Map<?,?>)org.springframework.test.util.ReflectionTestUtils.getField(s,"failures")).isEmpty();
+            assertThat(s.isInFlight(id)).isFalse();
+            assertThat(games.get(id).state().piecesOnBoard(Player.WHITE)).isZero();
+        }finally{release.countDown();s.close();pool.shutdownNow();}
+    }
     @Test void deduplicatesQueuedTasksAndResignationCancelsTheirWrite() {
         UUID id=create(PlayerColor.BLACK);
         var queued=new ArrayList<Runnable>();

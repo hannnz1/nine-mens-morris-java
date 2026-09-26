@@ -154,9 +154,10 @@ public class GameSessionService {
                 new PlayerCredential(Player.BLACK, entity.getBlackPlayer(), blackToken));
     }
 
-    @Transactional
+    @Transactional(isolation = Isolation.READ_COMMITTED)
     public CreateGameResponse createForPlayer(PlayerEntity white, String idempotencyKey, String timeControlLabel) {
         TimeControl timeControl = TimeControl.parse(timeControlLabel); // validate before any side effect
+        lockHumanPlayers(white);
         // 20/min per player, per spec §3.5. Checked before the idempotency lookup so a retried
         // request under the same key is never itself penalized twice for the same logical create.
         if (!rateLimiter.tryAcquire("game-create:" + white.getId(), 20, java.time.Duration.ofMinutes(1))) {
@@ -171,10 +172,7 @@ public class GameSessionService {
             return readJson(previous.get().getResponseJson(), CreateGameResponse.class);
         }
 
-        long activeGames = games.countActiveGamesForPlayer(white.getId(), ACTIVE_STATUSES);
-        if (activeGames >= 5) {
-            throw new ApiException(HttpStatus.CONFLICT, "TOO_MANY_ACTIVE_GAMES", "You already have 5 active or waiting games");
-        }
+        requireHumanCapacity(white);
 
         Instant now = clock.instant();
         GameState state = GameEngine.newGame().state();
@@ -200,6 +198,7 @@ public class GameSessionService {
         var color = request.color() == null ? PlayerColor.RANDOM : request.color();
         String fingerprint = tokens.hash(human.getId() + ":create:BOT:" + request.difficulty() + ":" + color + ":" + time);
         botCapacity.lock(); // held through replay, capacity check and transaction commit
+        lockHumanPlayers(human);
         var previous = playerIdempotencyRecords.findByIdPlayerIdAndIdIdempotencyKey(human.getId(), idempotencyKey);
         if (previous.isPresent()) {
             if (!previous.get().getRequestFingerprint().equals(fingerprint))
@@ -228,6 +227,14 @@ public class GameSessionService {
         return response;
     }
 
+    // Admission lock order: existing game (if any), global bot capacity (if needed),
+    // then human UUIDs in ascending order. Counts are read after acquiring all player locks.
+    private void lockHumanPlayers(PlayerEntity... players) {
+        java.util.Arrays.stream(players).map(PlayerEntity::getId).filter(id -> !BotRoster.isBot(id))
+                .distinct().sorted().forEach(id -> playerRepository.findByIdForUpdate(id)
+                        .orElseThrow(() -> new IllegalStateException("Player no longer exists: " + id)));
+    }
+
     private void requireHumanCapacity(PlayerEntity player) {
         if (!BotRoster.isBot(player.getId()) && games.countActiveGamesForPlayer(player.getId(), ACTIVE_STATUSES) >= 5)
             throw new ApiException(HttpStatus.CONFLICT, "TOO_MANY_ACTIVE_GAMES", "A player already has 5 active or waiting games");
@@ -239,6 +246,7 @@ public class GameSessionService {
         // Pattern A: lock first, so a concurrent retry under the same key serializes behind the
         // first request and then replays its committed record.
         GameSessionEntity entity = findGameForUpdate(id);
+        lockHumanPlayers(black);
         var previous = playerIdempotencyRecords.findByIdPlayerIdAndIdIdempotencyKey(black.getId(), idempotencyKey);
         if (previous.isPresent()) {
             if (!previous.get().getRequestFingerprint().equals(fingerprint)) {
@@ -267,6 +275,7 @@ public class GameSessionService {
         if (!"WAITING_FOR_PLAYER".equals(entity.getStatus())) {
             throw new ApiException(HttpStatus.CONFLICT, "GAME_NOT_ACTIVE", "This game can no longer be joined");
         }
+        requireHumanCapacity(black);
         entity.assignPlayers(entity.getWhitePlayerId(), black.getId());
         entity.joinBlackPlayer(black.getNickname(), "", clock.instant());
         // A Bearer game created before M2 shipped has a NULL base_ms/increment_ms (createForPlayer
@@ -764,6 +773,7 @@ public class GameSessionService {
 
         boolean botGame = BotRoster.side(newWhite.getId(), newBlack.getId()) != null;
         if (botGame) botCapacity.requireAvailable();
+        lockHumanPlayers(newWhite, newBlack);
         requireHumanCapacity(newWhite);
         requireHumanCapacity(newBlack);
 

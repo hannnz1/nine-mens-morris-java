@@ -31,7 +31,9 @@ public final class BotTurnScheduler implements AutoCloseable {
     }
     @EventListener public void committed(GameCommittedEvent event) { onGameCommitted(event.game()); }
     public void onGameCommitted(GameResponse game) {
-        if(!"IN_PROGRESS".equals(game.status())) failures.remove(game.id());
+        if(!"IN_PROGRESS".equals(game.status())) {
+            synchronized(failures) { failures.remove(game.id()); }
+        }
         if(eligible(game)) schedule(game.id(),false);
     }
     static boolean eligible(GameResponse game) {
@@ -82,8 +84,21 @@ public final class BotTurnScheduler implements AutoCloseable {
         }
     }
     private void failed(UUID id,RuntimeException error) {
-        failures.merge(id,1,Integer::sum);
-        LOG.error("Bot computation failed for game {} (attempt {})",id,failures.get(id),error);
+        // Serialize failure insertion with terminal notifications and close. Re-read inside
+        // this boundary: a computation may have started before the game finished.
+        synchronized(failures) {
+            if(closed)return;
+            try {
+                if(!"IN_PROGRESS".equals(games.get(id).status())) { failures.remove(id); return; }
+            } catch(RuntimeException lookupError) {
+                LOG.warn("Could not verify game {} after bot failure; watchdog will retry",id,lookupError);
+                return;
+            }
+            int attempt=failures.merge(id,1,Integer::sum);
+            LOG.error("Bot computation failed for game {} (attempt {})",id,attempt,error);
+        }
     }
-    @Override public void close() { closed=true;inFlight.clear();failures.clear(); }
+    @Override public void close() {
+        synchronized(failures) { closed=true;inFlight.clear();failures.clear(); }
+    }
 }
