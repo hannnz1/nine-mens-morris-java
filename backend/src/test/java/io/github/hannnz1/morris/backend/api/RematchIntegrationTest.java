@@ -189,6 +189,40 @@ class RematchIntegrationTest extends PostgresIntegrationTest {
         assertThat(((Number) clockView.get("blackMs")).longValue()).isEqualTo(5 * 60_000L);
     }
 
+    // A player who left a finished game must be able to find it again in 我的对局 while a rematch
+    // is still possible, and see that the opponent is waiting on an answer.
+    @Test
+    void finishedGamesListShowsWhetherARematchIsStillOpenAndWhoOfferedIt() {
+        var white = createPlayer("Han");
+        var black = createPlayer("Zhu");
+        var game = createAndJoinAndFinishByResignation(white, black);
+
+        Map<String, Object> beforeOffer = finishedSummary(black, game.id());
+        assertThat(beforeOffer.get("rematchOpen")).isEqualTo(true);
+        assertThat(beforeOffer.get("opponentOfferedRematch")).isEqualTo(false);
+
+        rematch(game.id(), white.token(), "OFFER");
+        assertThat(finishedSummary(black, game.id()).get("opponentOfferedRematch")).isEqualTo(true);
+        assertThat(finishedSummary(white, game.id()).get("opponentOfferedRematch")).isEqualTo(false);
+
+        ((MutableClock) clock).advance(Duration.ofMinutes(5).plusSeconds(1));
+        Map<String, Object> expired = finishedSummary(black, game.id());
+        assertThat(expired.get("rematchOpen")).isEqualTo(false);
+        assertThat(expired.get("opponentOfferedRematch")).isEqualTo(false);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> finishedSummary(TestPlayer player, UUID gameId) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setBearerAuth(player.token());
+        var response = rest.exchange(url("/api/v1/players/me/games?status=FINISHED&limit=50"), HttpMethod.GET,
+                new HttpEntity<>(headers), Map.class);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        return ((java.util.List<Map<String, Object>>) response.getBody().get("games")).stream()
+                .filter(summary -> gameId.toString().equals(summary.get("gameId")))
+                .findFirst().orElseThrow();
+    }
+
     private PlayerEntity playerEntityFor(TestPlayer player) {
         return players.findByTokenHash(tokenService.hash(player.token())).orElseThrow();
     }

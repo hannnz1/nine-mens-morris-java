@@ -220,6 +220,7 @@ input:focus, select:focus { border-color: var(--green-bright); box-shadow: 0 0 0
 .my-games-list li { border: 1px solid var(--line); border-radius: 8px; background: rgba(255,255,255,.5); }
 .my-games-list a { display: flex; justify-content: space-between; gap: 8px; padding: 10px 14px; color: inherit; text-decoration: none; font-size: 13px; }
 .my-games-list a:hover { background: rgba(35,102,83,.08); }
+.my-games-list a.is-invited { font-weight: 750; color: var(--green); }
 .my-games-list:empty::after { content: "暂无进行中的对局"; display: block; padding: 4px 2px; color: var(--muted); font-size: 12px; }
 .rules-panel { padding: 22px 26px; margin-top: 28px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
 summary { cursor: pointer; font-weight: 650; }

@@ -359,6 +359,102 @@ test('a rematchGameId appearing on the current game navigates into the new game'
     assert.strictEqual(h.run('client.session.side'),'BLACK'); // colours swap in a rematch
 });
 
+// Live bug: enterMyGame/joinRoomAsIdentity released entryBusy only if matches(ctx), but ctx was
+// taken before the session switched to the entered game, so a successful entry left entryBusy
+// stuck at true and every later entry - including the automatic jump into a rematch - silently
+// returned. Accepting a second rematch then appeared to do nothing.
+test('entering a game from my games releases entryBusy so later entries still work',async()=>{
+    const h=harness();
+    h.run('client.identity={playerId:"black-id",nickname:"Sam",clientToken:"x".repeat(43)};');
+    h.ctx.fetch=async()=>response(identityGame(B,'white-id','black-id'));
+    await h.run('enterMyGame(B_ID)'.replace('B_ID',JSON.stringify(B)));
+    assert.strictEqual(h.run('client.entryBusy'),false);
+});
+
+test('joining by room code as an identity releases entryBusy',async()=>{
+    const h=harness();
+    h.run('client.identity={playerId:"black-id",nickname:"Sam",clientToken:"x".repeat(43)};');
+    h.ctx.fetch=async()=>response({game:identityGame(B,'white-id','black-id')});
+    await h.run('joinRoomAsIdentity(B_ID)'.replace('B_ID',JSON.stringify(B)));
+    assert.strictEqual(h.run('client.session.gameId'),B);
+    assert.strictEqual(h.run('client.entryBusy'),false);
+});
+
+test('a player who joined by room code can still be taken into an accepted rematch',async()=>{
+    const h=harness();
+    const C='cccccccc-cccc-cccc-cccc-cccccccccccc';
+    h.run('client.identity={playerId:"black-id",nickname:"Sam",clientToken:"x".repeat(43)};');
+    h.ctx.fetch=async()=>response({game:identityGame(A,'white-id','black-id')});
+    await h.run('joinRoomAsIdentity(A_ID)'.replace('A_ID',JSON.stringify(A)));
+    const rematch=identityGame(C,'black-id','white-id');
+    h.ctx.fetch=async()=>response(rematch);
+    h.ctx.next=identityGame(A,'white-id','black-id');h.ctx.next.version=9;h.ctx.next.status='DRAWN';h.ctx.next.rematchGameId=C;
+    h.run('applyGame(next,"REST")');
+    await new Promise(setImmediate);await new Promise(setImmediate);await new Promise(setImmediate);
+    assert.strictEqual(h.run('client.session.gameId'),C);
+    assert.strictEqual(h.run('client.session.side'),'WHITE');
+});
+
+test('the offering player is told when the opponent declines the rematch',()=>{
+    const h=harness();h.activate();
+    h.run('client.identity={playerId:"white-id",nickname:"Sam",clientToken:"x".repeat(43)}; client.session.bearer=true;');
+    h.ctx.g1=identityGame(A,'white-id','black-id');h.ctx.g1.version=5;h.ctx.g1.status='DRAWN';h.ctx.g1.rematchOfferedBy='WHITE';
+    h.run('applyGame(g1,"WEBSOCKET")');
+    h.ctx.g2=identityGame(A,'white-id','black-id');h.ctx.g2.version=6;h.ctx.g2.status='DRAWN';h.ctx.g2.rematchOfferedBy=null;
+    h.run('applyGame(g2,"WEBSOCKET")');
+    assert.strictEqual(h.nodes.get('toast').textContent,'对方拒绝了再来一局');
+    assert.strictEqual(h.nodes.get('rematchButton').hidden,false);
+});
+
+test('the declining player gets a confirmation instead of a silent button swap',()=>{
+    const h=harness();h.activate();
+    h.run('client.identity={playerId:"white-id",nickname:"Sam",clientToken:"x".repeat(43)}; client.session.bearer=true;');
+    h.ctx.g1=identityGame(A,'white-id','black-id');h.ctx.g1.version=5;h.ctx.g1.status='DRAWN';h.ctx.g1.rematchOfferedBy='BLACK';
+    h.run('applyGame(g1,"WEBSOCKET")');
+    h.ctx.g2=identityGame(A,'white-id','black-id');h.ctx.g2.version=6;h.ctx.g2.status='DRAWN';h.ctx.g2.rematchOfferedBy=null;
+    h.run('applyGame(g2,"REST")');
+    assert.strictEqual(h.nodes.get('toast').textContent,'已拒绝再来一局');
+});
+
+test('my games also lists finished games whose rematch is still open, flagging a pending offer',async()=>{
+    const h=harness();
+    h.run('client.identity={playerId:"p1",nickname:"Sam",clientToken:"x".repeat(43)};');
+    const urls=[];
+    h.ctx.fetch=async url=>{urls.push(url);
+        if(url.includes('status=FINISHED'))return response({games:[
+            {gameId:'f1',status:'DRAWN',opponentNickname:'Bo',rematchOpen:true,opponentOfferedRematch:true},
+            {gameId:'f2',status:'WHITE_WON',opponentNickname:'Cy',rematchOpen:true,opponentOfferedRematch:false},
+            {gameId:'f3',status:'BLACK_WON',opponentNickname:'Di',rematchOpen:false,opponentOfferedRematch:false}]});
+        return response({games:[{gameId:'a1',status:'IN_PROGRESS',opponentNickname:'Al'}]});};
+    const texts=[];
+    h.ctx.document.createElement=()=>{const n={children:[],textContent:'',addEventListener(){},appendChild(c){n.children.push(c);},classList:{add(){}}};return n;};
+    h.nodes.get('my-games-list').appendChild=item=>texts.push(item.children.map(c=>c.textContent).join(''));
+    await h.run('renderMyGames()');
+    assert.ok(urls.some(u=>u.includes('status=ACTIVE')) && urls.some(u=>u.includes('status=FINISHED')));
+    assert.strictEqual(texts.length,3); // the expired f3 is not listed
+    assert.match(texts[0],/Al/);
+    assert.ok(texts.some(t=>/Bo/.test(t) && /邀请/.test(t)));
+    assert.ok(texts.some(t=>/Cy/.test(t) && /再来一局/.test(t) && !/邀请/.test(t)));
+});
+
+test('leaving a game refreshes my games so the game just left can be found again',async()=>{
+    const h=harness();h.activate();
+    h.run('client.identity={playerId:"p1",nickname:"Sam",clientToken:"x".repeat(43)}; client.session.bearer=true; client.game.status="DRAWN";');
+    const urls=[];
+    h.ctx.fetch=async url=>{urls.push(url);return response({games:[]});};
+    h.run('leaveGame()');
+    await new Promise(setImmediate);
+    assert.ok(urls.some(u=>u.includes('/players/me/games')));
+});
+
+test('joining your own game explains how to join as the opponent in Chinese',()=>{
+    const h=harness();
+    h.ctx.err={code:'CANNOT_JOIN_OWN_GAME',message:'Use a different browser or device to join as the other player'};
+    assert.match(h.run('readableError(err)'),/无痕窗口/);
+    h.ctx.err={code:'GAME_ALREADY_FULL',message:'The game already has two players'};
+    assert.match(h.run('readableError(err)'),/已满/);
+});
+
 // Final-review C1: sides come from player ids, never nicknames.
 const identityGame=(id,whiteId,blackId)=>{const g=game(id);g.whitePlayer='Sam';g.blackPlayer='Sam';g.whitePlayerId=whiteId;g.blackPlayerId=blackId;return g;};
 test('mySide uses player ids: two identities with the same nickname, viewer is black',()=>{

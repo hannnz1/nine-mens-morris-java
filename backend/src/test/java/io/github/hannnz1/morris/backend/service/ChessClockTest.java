@@ -14,6 +14,9 @@ import io.github.hannnz1.morris.backend.support.PostgresIntegrationTest;
 import io.github.hannnz1.morris.engine.ActionType;
 import io.github.hannnz1.morris.engine.BoardPosition;
 import io.github.hannnz1.morris.engine.GameEngine;
+import io.github.hannnz1.morris.engine.GameState;
+import io.github.hannnz1.morris.engine.Piece;
+import io.github.hannnz1.morris.engine.Player;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -24,6 +27,9 @@ import org.springframework.context.annotation.Primary;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.EnumMap;
+import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -370,6 +376,42 @@ class ChessClockTest extends PostgresIntegrationTest {
         assertThat(afterRemove.clock().whiteMs()).isEqualTo(292_000L); // 291_000 - 2_000 + 3_000
         assertThat(afterRemove.clock().blackMs()).isEqualTo(299_000L);
         assertThat(afterRemove.clock().turnDeadlineAt()).isEqualTo(removeAt.plusMillis(299_000L));
+    }
+
+    // End-to-end settlement when the engine itself ends the game: a winning REMOVE charges the
+    // mover's elapsed turn time, adds no increment (the turn never hands off), leaves the loser's
+    // clock untouched, and stops the clock.
+    @Test
+    void aGameEndingMoveSettlesTheMoversClockWithoutIncrementAndStopsTheClock() {
+        GameResponse game = playBothFirstMoves(startedGame("5+3")); // White to move, 300_000 each
+
+        // Jump to an endgame: White has just milled (A1-D1-G1) and must remove; Black is down to
+        // three loose pieces, so the removal leaves Black with two and ends the game.
+        EnumMap<BoardPosition, Piece> board = new EnumMap<>(BoardPosition.class);
+        for (BoardPosition position : BoardPosition.values()) board.put(position, Piece.EMPTY);
+        for (BoardPosition position : List.of(BoardPosition.A1, BoardPosition.D1, BoardPosition.G1, BoardPosition.A4))
+            board.put(position, Piece.WHITE);
+        for (BoardPosition position : List.of(BoardPosition.B2, BoardPosition.F4, BoardPosition.D6))
+            board.put(position, Piece.BLACK);
+        GameState endgame = new GameState(board, Player.WHITE, 0, 0, true, null, 40, Map.of(), 0, null);
+        GameSessionEntity entity = gameRepository.findById(game.id()).orElseThrow();
+        try {
+            entity.updateState("IN_PROGRESS", objectMapper.writeValueAsString(endgame), clock.instant());
+        } catch (com.fasterxml.jackson.core.JsonProcessingException exception) {
+            throw new IllegalStateException(exception);
+        }
+        long version = gameRepository.saveAndFlush(entity).getVersion();
+
+        ((MutableClock) clock).advance(Duration.ofSeconds(6));
+        GameResponse finished = gameSessions.performAction(game.id(), whiteToken, null, "winning-remove",
+                new ActionRequest(ActionType.REMOVE, null, BoardPosition.B2, version)).game();
+
+        assertThat(finished.status()).isEqualTo("WHITE_WON");
+        assertThat(finished.result().reason()).isEqualTo("NO_PIECES");
+        assertThat(finished.clock().whiteMs()).isEqualTo(294_000L); // 300_000 - 6_000, no increment
+        assertThat(finished.clock().blackMs()).isEqualTo(300_000L);
+        assertThat(finished.clock().running()).isFalse();
+        assertThat(finished.clock().turnDeadlineAt()).isNull();
     }
 
     private GameResponse playBothFirstMoves(GameResponse game) {
