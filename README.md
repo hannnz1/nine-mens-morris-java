@@ -200,7 +200,7 @@ java -jar .\backend\target\backend-1.0.0-SNAPSHOT.jar
 | `POST` | `/api/v1/players` | 以客户端生成的 `clientToken` 创建或恢复持久玩家身份 |
 | `GET` | `/api/v1/players/me` | 使用 `Authorization: Bearer` 读取当前玩家信息 |
 | `PATCH` | `/api/v1/players/me` | 使用 `Authorization: Bearer` 修改昵称 |
-| `GET` | `/api/v1/players/me/games` | 使用 `Authorization: Bearer` 分页读取当前玩家的历史/进行中对局 |
+| `GET` | `/api/v1/players/me/games` | 使用 `Authorization: Bearer` 分页读取当前玩家的历史/进行中对局；每条摘要带 `rematchOpen`（仍可再来一局）和 `opponentOfferedRematch`（对手已邀请） |
 | `GET` | `/api/v1/rooms/{roomCode}` | 按 6 位房间号查询对局，无需身份凭证 |
 | `POST` | `/api/v1/games` | 创建白方等待局；携带 `Authorization: Bearer` 及 `Idempotency-Key` 时按持久身份创建，否则回退到创建匿名白方凭证的旧流程 |
 | `POST` | `/api/v1/games/{id}/join` | 申请或恢复黑方席位；携带 `Authorization: Bearer` 及 `Idempotency-Key` 时按持久身份加入，否则回退到 `joinToken` 匿名加入的旧流程 |

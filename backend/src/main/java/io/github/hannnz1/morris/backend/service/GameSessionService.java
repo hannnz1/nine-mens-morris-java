@@ -50,6 +50,7 @@ public class GameSessionService {
     private static final org.slf4j.Logger LOGGER = org.slf4j.LoggerFactory.getLogger(GameSessionService.class);
     private static final List<String> ACTIVE_STATUSES = List.of("WAITING_FOR_PLAYER", "IN_PROGRESS");
     private static final List<String> FINISHED_STATUSES = List.of("WHITE_WON", "BLACK_WON", "DRAWN", "ABORTED", "CANCELLED");
+    private static final Duration REMATCH_WINDOW = Duration.ofMinutes(5);
     private static final int MAX_DRAW_OFFERS = 3;
 
     private final GameSessionRepository games;
@@ -250,10 +251,17 @@ public class GameSessionService {
         List<GameSessionEntity> rows = before == null
                 ? games.findForPlayer(playerId, statuses, pageable)
                 : games.findForPlayerBefore(playerId, statuses, before, pageable);
+        Instant now = clock.instant();
         List<GameSummary> summaries = rows.stream()
-                .map(row -> new GameSummary(row.getId(), row.getStatus(),
-                        playerId.equals(row.getWhitePlayerId()) ? row.getBlackPlayer() : row.getWhitePlayer(),
-                        row.getUpdatedAt()))
+                .map(row -> {
+                    boolean isWhite = playerId.equals(row.getWhitePlayerId());
+                    boolean rematchOpen = isRematchOpen(row, now);
+                    String opponentSide = isWhite ? "BLACK" : "WHITE";
+                    return new GameSummary(row.getId(), row.getStatus(),
+                            isWhite ? row.getBlackPlayer() : row.getWhitePlayer(),
+                            row.getUpdatedAt(), rematchOpen,
+                            rematchOpen && row.hasPendingRematchOfferFrom(opponentSide));
+                })
                 .toList();
         Instant nextBefore = summaries.size() == boundedLimit ? summaries.get(summaries.size() - 1).updatedAt() : null;
         return new GameListResponse(summaries, nextBefore);
@@ -617,10 +625,7 @@ public class GameSessionService {
                     UUID.randomUUID(), id, idempotencyKey, fingerprint, writeJson(existing), clock.instant()));
             return existing;
         }
-        if (!List.of("WHITE_WON", "BLACK_WON", "DRAWN").contains(entity.getStatus())
-                || entity.getWhitePlayerId() == null || entity.getBlackPlayerId() == null
-                || entity.getFinishedAt() == null
-                || !clock.instant().isBefore(entity.getFinishedAt().plus(Duration.ofMinutes(5)))) {
+        if (!isRematchOpen(entity, clock.instant())) {
             throw new ApiException(HttpStatus.CONFLICT, "GAME_NOT_ACTIVE", "This game cannot be rematched");
         }
 
@@ -671,6 +676,16 @@ public class GameSessionService {
     // the new game's WHITE is whoever was BLACK in the original, and vice versa - this holds no
     // matter which side calls ACCEPT, or which side's OFFER triggers the "both offered" path, so it
     // does not depend on `acceptingPlayer` at all.
+    // A rematch can still be offered/accepted: a decided identity game, finished less than 5 minutes
+    // ago, with no rematch game created yet. Shared by /rematch and the 我的对局 summaries.
+    private static boolean isRematchOpen(GameSessionEntity game, Instant now) {
+        return List.of("WHITE_WON", "BLACK_WON", "DRAWN").contains(game.getStatus())
+                && game.getWhitePlayerId() != null && game.getBlackPlayerId() != null
+                && game.getRematchGameId() == null
+                && game.getFinishedAt() != null
+                && now.isBefore(game.getFinishedAt().plus(REMATCH_WINDOW));
+    }
+
     private GameResponse createRematchGame(GameSessionEntity original) {
         PlayerEntity newWhite = playerByIdOrThrow(original.getBlackPlayerId());
         PlayerEntity newBlack = playerByIdOrThrow(original.getWhitePlayerId());

@@ -390,6 +390,8 @@ function leaveGame() {
     }
     showSetup();
     setConnection("offline", releaseSaved ? "尚未进入对局" : "身份已保存，可恢复对局");
+    // The game just left may still accept a rematch; show it in 我的对局 straight away.
+    if (client.identity) void renderMyGames();
 }
 
 async function refreshGame(reason = "状态刷新") {
@@ -1072,13 +1074,24 @@ async function ensureIdentity() {
 async function renderMyGames() {
     if (!client.identity || !elements.myGamesList) return;
     try {
-        const result = await api("/api/v1/players/me/games?status=ACTIVE", { headers: authHeader(client.identity.clientToken) });
+        const headers = authHeader(client.identity.clientToken);
+        // Finished games stay listed while a rematch is still possible, so a player who left one
+        // can come back and answer the opponent's offer within the 5-minute window.
+        const [active, finished] = await Promise.all([
+            api("/api/v1/players/me/games?status=ACTIVE", { headers }),
+            api("/api/v1/players/me/games?status=FINISHED&limit=10", { headers })
+                .catch(() => ({ games: [] }))
+        ]);
+        const summaries = [...(active.games || []), ...(finished.games || []).filter(s => s.rematchOpen)];
         elements.myGamesList.replaceChildren();
-        for (const summary of result.games || []) {
+        for (const summary of summaries) {
             const item = document.createElement("li");
             const link = document.createElement("a");
             link.href = `?game=${summary.gameId}`;
-            link.textContent = `${summary.opponentNickname || "等待对手"} · ${gameStatusLabel(summary.status)}`;
+            const rematchNote = !summary.rematchOpen ? ""
+                : summary.opponentOfferedRematch ? " · 对手邀请再来一局" : " · 可再来一局";
+            link.textContent = `${summary.opponentNickname || "等待对手"} · ${gameStatusLabel(summary.status)}${rematchNote}`;
+            if (summary.opponentOfferedRematch) link.classList.add("is-invited");
             link.addEventListener("click", event => {
                 event.preventDefault();
                 void enterMyGame(summary.gameId);

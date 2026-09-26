@@ -24,7 +24,10 @@ public final class PlayerApiDtos {
     public record PlayerResponse(UUID playerId, String nickname, Instant createdAt) {
     }
 
-    public record GameSummary(UUID gameId, String status, String opponentNickname, Instant updatedAt) {
+    // rematchOpen: finished within the rematch window and no rematch game created yet.
+    // opponentOfferedRematch: the opponent's rematch offer is waiting on this player's answer.
+    public record GameSummary(UUID gameId, String status, String opponentNickname, Instant updatedAt,
+                              boolean rematchOpen, boolean opponentOfferedRematch) {
     }
 
     public record GameListResponse(List<GameSummary> games, Instant nextBefore) {

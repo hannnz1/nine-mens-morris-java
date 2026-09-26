@@ -416,6 +416,37 @@ test('the declining player gets a confirmation instead of a silent button swap',
     assert.strictEqual(h.nodes.get('toast').textContent,'已拒绝再来一局');
 });
 
+test('my games also lists finished games whose rematch is still open, flagging a pending offer',async()=>{
+    const h=harness();
+    h.run('client.identity={playerId:"p1",nickname:"Sam",clientToken:"x".repeat(43)};');
+    const urls=[];
+    h.ctx.fetch=async url=>{urls.push(url);
+        if(url.includes('status=FINISHED'))return response({games:[
+            {gameId:'f1',status:'DRAWN',opponentNickname:'Bo',rematchOpen:true,opponentOfferedRematch:true},
+            {gameId:'f2',status:'WHITE_WON',opponentNickname:'Cy',rematchOpen:true,opponentOfferedRematch:false},
+            {gameId:'f3',status:'BLACK_WON',opponentNickname:'Di',rematchOpen:false,opponentOfferedRematch:false}]});
+        return response({games:[{gameId:'a1',status:'IN_PROGRESS',opponentNickname:'Al'}]});};
+    const texts=[];
+    h.ctx.document.createElement=()=>{const n={children:[],textContent:'',addEventListener(){},appendChild(c){n.children.push(c);},classList:{add(){}}};return n;};
+    h.nodes.get('my-games-list').appendChild=item=>texts.push(item.children.map(c=>c.textContent).join(''));
+    await h.run('renderMyGames()');
+    assert.ok(urls.some(u=>u.includes('status=ACTIVE')) && urls.some(u=>u.includes('status=FINISHED')));
+    assert.strictEqual(texts.length,3); // the expired f3 is not listed
+    assert.match(texts[0],/Al/);
+    assert.ok(texts.some(t=>/Bo/.test(t) && /邀请/.test(t)));
+    assert.ok(texts.some(t=>/Cy/.test(t) && /再来一局/.test(t) && !/邀请/.test(t)));
+});
+
+test('leaving a game refreshes my games so the game just left can be found again',async()=>{
+    const h=harness();h.activate();
+    h.run('client.identity={playerId:"p1",nickname:"Sam",clientToken:"x".repeat(43)}; client.session.bearer=true; client.game.status="DRAWN";');
+    const urls=[];
+    h.ctx.fetch=async url=>{urls.push(url);return response({games:[]});};
+    h.run('leaveGame()');
+    await new Promise(setImmediate);
+    assert.ok(urls.some(u=>u.includes('/players/me/games')));
+});
+
 test('joining your own game explains how to join as the opponent in Chinese',()=>{
     const h=harness();
     h.ctx.err={code:'CANNOT_JOIN_OWN_GAME',message:'Use a different browser or device to join as the other player'};
